@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]/'scripts'))
 from setup import build_config, drop_tables, share_instructions
-from bridge_config import DEFAULT_LABEL, DEFAULT_PORT, service_env, load_models
+from bridge_config import DEFAULT_LABEL, DEFAULT_PORT, service_env, load_models, source_home
 
 SOURCE = '''model = "gpt-6"
 model_provider = "openai"
@@ -110,7 +110,20 @@ class ServiceEnvironmentTests(unittest.TestCase):
         self.assertEqual(DEFAULT_LABEL, 'io.github.wuchris-ch.claude-for-chatgpt-desktop')
         self.assertEqual(load_models()['default'], 'claude-opus')
 
+    def test_the_bridge_profile_is_never_the_source_profile(self):
+        saved = {k: os.environ.get(k) for k in ('CODEX_HOME', 'CLAUDE_BRIDGE_RUNTIME')}
+        def restore():
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        self.addCleanup(restore)
+        os.environ['CLAUDE_BRIDGE_RUNTIME'] = '/tmp/bridge-runtime'
+        os.environ['CODEX_HOME'] = '/tmp/bridge-runtime/codex'
+        self.assertEqual(source_home(), pathlib.Path.home()/'.codex')
+        os.environ['CODEX_HOME'] = '/tmp/other-profile'
+        self.assertEqual(source_home(), pathlib.Path('/tmp/other-profile'))
+        os.environ.pop('CODEX_HOME')
+        self.assertEqual(source_home(), pathlib.Path.home()/'.codex')
+
 
 if __name__ == '__main__':
     unittest.main()
-

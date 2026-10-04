@@ -8,7 +8,7 @@ import https from 'node:https';
 import {EventEmitter} from 'node:events';
 import {timingSafeEqual} from 'node:crypto';
 import {WebSocketServer, WebSocket} from 'ws';
-import {digest, uid, openCheckpoint} from './protocol.mjs';
+import {digest, uid, isBridgeId, openCheckpoint} from './protocol.mjs';
 import {catalogEntries, pickTemplate} from './catalog.mjs';
 
 export const GATEWAY_UPSTREAM='https://chatgpt.com/backend-api/codex';
@@ -44,17 +44,28 @@ export function withClaudeModels(list,models) {
   return [...kept,...catalogEntries(template,models,{priorityStart:last+1})];
 }
 
-// A Claude checkpoint in a GPT-bound request becomes its plain summary,
-// because only the bridge can open it. Returns null when nothing changed.
-export function openBridgeCheckpoints(input,token) {
+// Prepares the input of a GPT-bound request. A Claude checkpoint becomes its
+// plain summary, because only the bridge can open it, and items Claude wrote
+// lose their bridge-made ids, which OpenAI may otherwise look up in storage
+// and reject. Returns null when nothing changed.
+export function prepareForOpenAI(input,token) {
   if(!Array.isArray(input))return null;
-  let changed=false;
+  let checkpoints=0,ids=0;
   const out=input.map(x=>{
-    if(!['compaction','context_compaction'].includes(x?.type)||!String(x.encrypted_content??'').startsWith(BRIDGE_CHECKPOINT))return x;
-    changed=true;
-    return {type:'message',role:'user',content:[{type:'input_text',text:'<context_checkpoint>\n'+openCheckpoint(x.encrypted_content,token)+'\n</context_checkpoint>\nContinue the existing task from this checkpoint.'}]};
+    if(['compaction','context_compaction'].includes(x?.type)&&String(x.encrypted_content??'').startsWith(BRIDGE_CHECKPOINT)) {
+      checkpoints++;
+      return {type:'message',role:'user',content:[{type:'input_text',text:'<context_checkpoint>\n'+openCheckpoint(x.encrypted_content,token)+'\n</context_checkpoint>\nContinue the existing task from this checkpoint.'}]};
+    }
+    if(!isBridgeId(x?.id))return x;
+    ids++;
+    const {id,...rest}=x;return rest;
   });
-  return changed?out:null;
+  return checkpoints||ids?{input:out,checkpoints,ids}:null;
+}
+
+function logPrepared(log,prepared,transport) {
+  if(prepared.checkpoints)log('checkpoint_opened_for_gpt',{transport});
+  if(prepared.ids)log('claude_ids_removed_for_gpt',{transport,items:prepared.ids});
 }
 
 function forwardHeaders(source,drop,host) {
@@ -73,6 +84,7 @@ export function relayHttp(req,res,target,body,{tag,finish,log=()=>{}}={}) {
   if(finish)headers['accept-encoding']='identity';
   if(body)headers['content-length']=String(body.length);
   return new Promise(resolve=>{
+    let clientClosed=false;
     const upstream=(url.protocol==='https:'?https:http).request(url,{method:req.method,headers},response=>{
       const out=forwardHeaders(response.headers,new Set([...HOP].filter(x=>x!=='content-length')));
       if(tag){
@@ -89,12 +101,14 @@ export function relayHttp(req,res,target,body,{tag,finish,log=()=>{}}={}) {
       response.on('error',()=>{res.destroy();resolve();});
     });
     upstream.on('error',error=>{
-      log('gateway_upstream_error',{code:error.code});
+      // Destroying the upstream request after the app hung up also lands here.
+      if(clientClosed)log('gateway_client_closed',{method:req.method,path:url.pathname});
+      else log('gateway_upstream_error',{code:error.code,method:req.method,path:url.pathname});
       if(!res.headersSent){res.writeHead(502,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:'The bridge could not reach OpenAI ('+(error.code??'network error')+').'}}));}
       else res.destroy();
       resolve();
     });
-    res.on('close',()=>{if(!res.writableFinished)upstream.destroy();});
+    res.on('close',()=>{if(!res.writableFinished){clientClosed=true;upstream.destroy();}});
     upstream.end(body??undefined);
   });
 }
@@ -202,9 +216,9 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     if(req.method==='POST'&&sub==='/responses'&&decoded&&bridge.models.get(decoded.model))return serve({headers:req.headers,method:req.method,gateway:'http'},res,decoded);
     if(req.method==='GET'&&sub==='/models')return relayHttp(req,res,target,null,{tag,finish:models,log});
     let body=raw;
-    if(req.method==='POST'&&sub==='/responses'&&decoded) {
-      const input=openBridgeCheckpoints(decoded.input,bridge.token);
-      if(input){body=Buffer.from(JSON.stringify({...decoded,input}));delete req.headers['content-encoding'];log('checkpoint_opened_for_gpt',{transport:'http'});}
+    if(req.method==='POST'&&sub.startsWith('/responses')&&decoded) {
+      const prepared=prepareForOpenAI(decoded.input,bridge.token);
+      if(prepared){body=Buffer.from(JSON.stringify({...decoded,input:prepared.input}));delete req.headers['content-encoding'];logPrepared(log,prepared,'http');}
     }
     return track(relayHttp(req,res,target,body,{tag,log}));
   }
@@ -254,8 +268,8 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
       if(message?.type==='response.create'&&bridge.models.get(message.model)){claude.create(message);return;}
       if(message?.type==='response.interrupt'&&claude.owns(message.response_id)){claude.interrupt();return;}
       if(message?.type==='response.create') {
-        const input=openBridgeCheckpoints(message.input,bridge.token);
-        if(input){data=Buffer.from(JSON.stringify({...message,input}));log('checkpoint_opened_for_gpt',{transport:'websocket'});}
+        const prepared=prepareForOpenAI(message.input,bridge.token);
+        if(prepared){data=Buffer.from(JSON.stringify({...message,input:prepared.input}));logPrepared(log,prepared,'websocket');}
         if(up.readyState===WebSocket.OPEN){pending++;active++;}
       }
       if(up.readyState===WebSocket.OPEN)up.send(data,{binary:isBinary});

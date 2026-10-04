@@ -92,6 +92,16 @@ class PickerTests(unittest.TestCase):
         self.assertEqual((self.codex/'config.toml').read_bytes(), b'openai_base_url = "https://proxy.example/v1"\n' + CONFIG)
         self.assertFalse((self.runtime/'picker.json').exists())
 
+    def test_a_profile_on_another_model_provider_is_left_alone(self):
+        other = b'model = "claude-opus"\nmodel_provider = "claude_bridge"\n' + CONFIG
+        (self.codex/'config.toml').write_bytes(other)
+        with self.assertRaises(SystemExit) as raised:
+            self.run_picker('install')
+        self.assertIn('model provider claude_bridge', str(raised.exception))
+        self.assertEqual((self.codex/'config.toml').read_bytes(), other)
+        self.assertFalse((self.runtime/'picker.json').exists())
+        self.assertIn('openai_base_url', picker.add_setting('model_provider = "openai"\n', 'http://127.0.0.1:1/g/k/backend-api/codex'))
+
     def test_a_setting_inside_a_table_does_not_count_and_a_profile_without_config_works(self):
         text = picker.add_setting('[profiles.x]\nopenai_base_url = "https://other"\n', 'http://127.0.0.1:1/g/k/backend-api/codex')
         self.assertTrue(text.startswith(picker.MARK+'\nopenai_base_url = "http://127.0.0.1:1/g/k/backend-api/codex"\n\n[profiles.x]'))

@@ -90,6 +90,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     source, codex = source_home(), runtime/'codex'
+    print('Reading settings and plugins from', source)
     models_file = str(pathlib.Path(args.models).expanduser().resolve()) if args.models else None
     models = load_models(models_file)
     for p in [runtime, codex, runtime/'user-data', runtime/'sessions', runtime/'logs']:

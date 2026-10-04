@@ -27,7 +27,7 @@ A bounded probe of each alias with the bridge's own Claude Code flags showed no 
 
 ### Automated tests
 
-128 tests pass: 104 Node tests and 24 Python tests. The Python tests also pass on `/usr/bin/python3` 3.9.6, which runs the LaunchAgent. The integration suite uses a deterministic stand-in for Claude Code plus the real MCP SDK client and server transport. New in 0.3.0:
+131 tests pass: 105 Node tests and 26 Python tests. The Python tests also pass on `/usr/bin/python3` 3.9.6, which runs the LaunchAgent. The integration suite uses a deterministic stand-in for Claude Code plus the real MCP SDK client and server transport. New in 0.3.0:
 
 - Each catalog model starts Claude Code with its own model, effort and display name; Haiku gets no effort flag.
 - Unknown models and unsupported efforts are refused with HTTP 400 before Claude Code starts.
@@ -38,6 +38,8 @@ A bounded probe of each alias with the bridge's own Claude Code flags showed no 
 - Claude Code is found through `CLAUDE_BIN`, then PATH, with an install hint when missing.
 - Web search is refused unless the bridge opts in. The setup builder points the profile at the bridge, removes global context-window overrides, keeps other settings, and replaces an older provider block. AGENTS.md and skills are shared only on request.
 - The desktop catalog lists each model with its own effort levels, context window and compaction limit (80% of the window).
+- Requests for GPT lose the ids of items Claude wrote and keep every other id, over HTTP and WebSocket.
+- The scripts never read the separate window's own profile as your ChatGPT profile, even when `CODEX_HOME` points at it, and picker mode refuses a profile that uses another model provider.
 
 ### Live checks with real Claude Code
 
@@ -76,7 +78,26 @@ The app's own runtime (`codex exec` from the app bundle) then ran against a thro
 | Forced compaction on Claude Haiku | Compacted mid-turn over WebSocket, continued in the next context window, and answered "HERON step-one step-two" |
 | Sonnet, then GPT, then Opus in one thread | Opus resumed Sonnet's native session with GPT's turn as history and answered: "The code word was KESTREL, and the previous assistant reply said exactly "FAKE-GPT over WebSocket"." |
 
-The checks against real OpenAI, in the app with a ChatGPT sign-in, follow once picker mode is installed on a real profile.
+#### Against real OpenAI
+
+Picker mode was then installed on a real, signed-in ChatGPT profile with ChatGPT 26.930.31730 (Codex 0.160.0) and Claude Code 2.1.287. A test client drove the app's own `codex app-server` from the app bundle, the process behind the ChatGPT window, on that profile with the same flags as the app. Each check used one ephemeral thread, low effort and short prompts:
+
+| Check | Result |
+|---|---|
+| Model list | The 8 GPT models OpenAI listed for the account, then Claude Opus, Claude Sonnet and Claude Haiku |
+| GPT with a shell tool | Ran through the relay over WebSocket and answered 323 |
+| Claude Opus after GPT, with a shell tool | Saw GPT's turn and answered "667,323" |
+| GPT after Claude | Read Claude's turn and answered "KESTREL 323 667" |
+| Image on Claude Sonnet | A red PNG: "Red" |
+| Message sent mid-turn | "skip deploy" arrived during the second of three shell calls; Claude acknowledged it in visible text and ran only build and test |
+| Stop, then continue | The Claude turn ended as interrupted; the next turn knew it had stopped at 32 |
+| Compaction on Claude, then GPT | One checkpoint; GPT read it as text and recalled KESTREL |
+| OpenAI's remote compaction over a mixed history, then Claude Haiku | OpenAI compacted a history containing Claude's items; Haiku continued from the kept messages and recalled KESTREL |
+| Stop on GPT | The interrupt reached OpenAI and the turn ended as interrupted |
+
+In the first run one GPT request failed: after an OpenAI compaction and a Claude Haiku turn, OpenAI rejected the next GPT request with "Supplied input item IDs require persisted-item lookup". A trace of what the bridge sent to OpenAI (item types and id prefixes only) showed that Claude's items still carried the bridge's own item ids, such as `msg_…` and `ctc_…`, which look like OpenAI's. OpenAI accepted them in most requests but sometimes tried to look them up in storage, which it cannot do for a request that is not stored. Bridge ids now carry a `claude` mark that OpenAI's hexadecimal ids never contain, and the gateway removes those ids, and only those, from requests for GPT. With the fix, a traced run sent no bridge id to OpenAI, and the full set of checks passed through the traced bridge and again through the installed service.
+
+Installing on the real profile also found two script problems, both fixed: `install.py` ignored its arguments, so `install.py --help` ran the installer, and a terminal inside the separate window inherits `CODEX_HOME` set to the bridge's own profile, which the scripts then read as your ChatGPT profile. `install.py` and `launch.py` now parse their arguments, the scripts fall back to `~/.codex` when `CODEX_HOME` is the bridge's own profile, `setup.py` and `picker.py` print the profile they use, and `picker.py` refuses a profile that uses another model provider.
 
 
 ## Desktop and live checks in 0.2.0

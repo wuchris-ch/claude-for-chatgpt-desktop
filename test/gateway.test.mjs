@@ -203,6 +203,26 @@ test('remote compaction of a Claude thread returns one checkpoint item that GPT 
  void sealCheckpoint;
 });
 
+test('requests for GPT drop the ids of items Claude wrote and keep every other id',async t=>{
+ const {openai,post,bridge,app,logs}=await setup(t);
+ const claude=events(await(await post({model:'claude-opus',stream:true,tools,input:[user('echo-input hello','u1')]})).text()).at(-1).response.output;
+ assert.match(claude[0].id,/^msg_claude[0-9a-f]{32}$/);
+ const fromGpt={type:'message',id:'msg_0cf69a12',role:'assistant',content:[{type:'output_text',text:'from gpt'}]};
+ const input=[user('echo-input hello','u1'),...claude,fromGpt,user('next','u2')];
+ const check=sent=>{
+  assert.deepEqual(sent.input.map(x=>x.id),['u1',...claude.map(()=>undefined),'msg_0cf69a12','u2']);
+  assert.deepEqual(sent.input.slice(1,1+claude.length),claude.map(({id,...rest})=>rest));
+ };
+ await(await post({model:'gpt-fixture',stream:true,input})).text();
+ check(JSON.parse(openai.seen.http[0].body.toString()));
+ const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses?v=2',{...app,'OpenAI-Beta':'responses_websockets=v2'});
+ c.ws.send(JSON.stringify({type:'response.create',model:'gpt-fixture',input,tools,stream:true}));
+ await c.next('response.completed');
+ check(openai.seen.ws[0]);
+ assert.deepEqual(logs.filter(x=>x.event==='claude_ids_removed_for_gpt').map(x=>x.transport),['http','websocket']);
+ c.ws.close();
+});
+
 test('when OpenAI cannot be reached, HTTP gets 502 and the WebSocket handshake fails',async t=>{
  const closed=http.createServer();await new Promise(r=>closed.listen(0,'127.0.0.1',r));const port=closed.address().port;await new Promise(r=>closed.close(r));
  const {bridge,post,app,logs}=await setup(t,{upstream:`http://127.0.0.1:${port}/backend-api/codex`});

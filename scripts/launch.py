@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Start the bridge if needed, then open the isolated ChatGPT window."""
+import argparse
 import os
 import json
 import pathlib
@@ -10,6 +11,7 @@ from bridge_config import DEFAULT_PORT, load_launch, load_models, runtime_dir, s
 from sync_runtime import refresh_capabilities
 from runtime_paths import resolve_node
 
+argparse.ArgumentParser(description='Start the bridge if needed, then open the separate ChatGPT window that uses only Claude.').parse_args()
 runtime=runtime_dir()
 if not (runtime/'launch.json').exists():
     raise SystemExit('Run python3 scripts/setup.py first.')
@@ -48,4 +50,3 @@ subprocess.run(['/usr/bin/open','-n','--env','CODEX_HOME='+str(runtime/'codex'),
                 '--env','CODEX_ELECTRON_USER_DATA_PATH='+str(runtime/'user-data'),config['app'],
                 '--args','--user-data-dir='+str(runtime/'user-data')],check=True)
 print('Opened ChatGPT with Claude.')
-

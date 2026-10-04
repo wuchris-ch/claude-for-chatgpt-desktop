@@ -24,8 +24,16 @@ def runtime_dir():
 
 
 def source_home():
-    """The normal ChatGPT desktop profile, which setup and sync only read."""
-    return pathlib.Path(os.environ.get('CODEX_HOME') or pathlib.Path.home() / '.codex')
+    """The normal ChatGPT desktop profile: CODEX_HOME if set, otherwise ~/.codex.
+
+    The separate window runs with CODEX_HOME set to the bridge's own profile, so
+    commands started from a terminal inside it would otherwise read that profile.
+    """
+    value = os.environ.get('CODEX_HOME')
+    home = pathlib.Path(value).expanduser() if value else pathlib.Path.home() / '.codex'
+    if value and home.resolve() == (runtime_dir() / 'codex').resolve():
+        return pathlib.Path.home() / '.codex'
+    return home
 
 
 def load_launch(runtime):

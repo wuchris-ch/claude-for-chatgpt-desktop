@@ -53,7 +53,7 @@ The separate window works the same way through its own model provider, without t
 - Images, edits and regeneration, helper agents, review mode and generated titles work as they do with GPT.
 - Switch models within a thread: Claude sees what GPT said and did since its last turn, and GPT can read Claude's compaction summaries.
 - In the separate window, the app's built-in web search is available as an opt-in.
-- 128 automated tests, live checks against real Claude Code and the app's own runtime, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
+- 131 automated tests, live checks against real Claude Code, real OpenAI and the app's own runtime, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
 
 ## Compared with similar projects
 
@@ -86,7 +86,7 @@ Run `python3 scripts/setup.py --help` for every option. Setup rewrites the Claud
 
 ### Picker mode
 
-`python3 scripts/picker.py install` changes one thing in your ChatGPT profile (`~/.codex`, or `$CODEX_HOME`): it adds a marked `openai_base_url` line to `config.toml`, pointing at the bridge with a private key in the path. It first saves `config.toml` and the app's cached model list to `backups/` in the runtime folder, and it refuses to run if you already set `openai_base_url` yourself.
+`python3 scripts/picker.py install` changes one thing in your ChatGPT profile (`~/.codex`, or `$CODEX_HOME`): it adds a marked `openai_base_url` line to `config.toml`, pointing at the bridge with a private key in the path. It first saves `config.toml` and the app's cached model list to `backups/` in the runtime folder, and it refuses to run if you already set `openai_base_url` yourself or the profile uses another model provider.
 
 `python3 scripts/picker.py uninstall` restores `config.toml` byte for byte when nothing else in it changed, or otherwise removes only the marked line and keeps your later edits, and restores the cached model list. `python3 scripts/picker.py status` shows whether picker mode is on. Reopen ChatGPT after either change.
 
@@ -185,7 +185,7 @@ Over the app's WebSocket, the bridge connects to OpenAI during the handshake so 
 ## Development
 
 ```sh
-npm test               # 128 tests with stand-ins for Claude Code and OpenAI
+npm test               # 131 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # nine short, low-effort checks with real Claude Code
 ```
 

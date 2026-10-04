@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Install a durable copy of the bridge as a per-user macOS service. Does not open the app."""
+import argparse
 import fcntl
 import json
 import os
@@ -16,6 +17,7 @@ from runtime_paths import resolve_node
 from release import atomic_write, switch_release
 
 root=pathlib.Path(__file__).resolve().parents[1]
+argparse.ArgumentParser(description='Install or update the '+APP_NAME+' service. Runs setup.py first if needed.').parse_args()
 expected_version=json.loads((root/'package.json').read_text())['version']
 runtime=runtime_dir()
 if not (runtime/'launch.json').exists():

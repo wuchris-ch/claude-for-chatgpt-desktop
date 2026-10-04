@@ -1,7 +1,10 @@
 import {createHash, randomUUID, randomBytes, createCipheriv, createDecipheriv} from 'node:crypto';
 
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const uid = prefix => `${prefix}_${randomUUID().replaceAll('-', '')}`;
+// Ids of items the bridge creates carry a mark that OpenAI's hex ids never
+// contain, so the gateway can recognize Claude's items in requests for GPT.
+export const uid = prefix => `${prefix}_claude${randomUUID().replaceAll('-', '')}`;
+export const isBridgeId = id => typeof id === 'string' && /^[a-z]+_claude[0-9a-f]{32}$/.test(id);
 
 export function validateRequestOptions(body) {
   const unsupported=[];

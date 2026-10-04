@@ -28,6 +28,7 @@ from bridge_config import DEFAULT_PORT, PROJECT, load_launch, runtime_dir, sourc
 
 MARK = '# Added by '+PROJECT+'. Remove with: python3 scripts/picker.py uninstall'
 KEY_LINE = re.compile(r'^[ \t]*openai_base_url[ \t]*=.*$', re.M)
+PROVIDER_LINE = re.compile(r'^[ \t]*model_provider[ \t]*=[ \t]*"?([^"\s#]+)', re.M)
 
 
 def gateway_url(port, key):
@@ -48,6 +49,10 @@ def add_setting(text, url):
     end = root_end(text)
     if KEY_LINE.search(text[:end]):
         raise SystemExit('Your config.toml already sets openai_base_url. Picker mode would replace it, so nothing was changed.')
+    provider = PROVIDER_LINE.search(text[:end])
+    if provider and provider.group(1) != 'openai':
+        raise SystemExit('This profile uses the model provider '+provider.group(1)+'. Picker mode works on a profile that uses '
+                         'ChatGPT\'s own OpenAI connection, usually ~/.codex. Nothing was changed.')
     root = text[:end]
     if root and not root.endswith('\n'):
         root += '\n'
@@ -99,6 +104,7 @@ def restart_service(config):
 
 def install(codex, runtime, service=True):
     config_file, cache_file, state_file = codex/'config.toml', codex/'models_cache.json', runtime/'picker.json'
+    print('ChatGPT profile:', codex)
     if state_file.exists():
         print('Picker mode is already on. Run uninstall first to reinstall.')
         return
@@ -193,4 +199,3 @@ def main(argv=None):
 
 if __name__ == '__main__':
     main()
-
