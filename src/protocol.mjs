@@ -124,7 +124,7 @@ export const inputKey = item => item.id ?? digest(item.content);
 // appears. Only those before the conversation starts form Claude's system prompt.
 // Folding later ones in changed the prompt mid-thread, which rebuilt a live
 // tool cycle or made Claude rewrite the whole prompt cache on the next turn.
-const isDeveloper = item => item.type === 'message' && ['developer', 'system'].includes(item.role);
+export const isDeveloper = item => item.type === 'message' && ['developer', 'system'].includes(item.role);
 const leadingEnd = input => {const i = input.findIndex(x => !isDeveloper(x)); return i < 0 ? input.length : i;};
 // The payload arrives as encrypted_content; with this provider it holds the
 // plain text the sending agent wrote.
@@ -165,6 +165,14 @@ export function newNotes(input, stamp) {
   const start = leadingEnd(input);
   return input.filter((x, i) => i > start && i >= from && isDeveloper(x));
 }
+// In picker mode GPT can answer between two Claude turns. Its messages and
+// tool activity after the history a stamp covers are what the native session
+// never saw. Reasoning items are encrypted for GPT and are left out.
+export function otherModelTurns(input, stamp) {
+  const since = input.slice(historyEnd(input, stamp));
+  return since.some(x => !isIncoming(x) && !isDeveloper(x) && !['reasoning', 'compaction_trigger'].includes(x.type)) ? since : null;
+}
+export const OTHER_MODEL_NOTE = '<other_model_turns>Another model continued this conversation after your last turn. Its messages and tool activity follow as history, then the new message.</other_model_turns>';
 // What the desktop added after a stopped turn that its native session never
 // received: user and agent messages, developer notes (the desktop notes the
 // interruption) and host tool output that was not relayed. Claude Code already

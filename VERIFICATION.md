@@ -2,7 +2,7 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode and opt-in web search; its checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode; its checks come first.
 
 ## Release 0.3.0, checked October 4, 2026
 
@@ -27,7 +27,7 @@ A bounded probe of each alias with the bridge's own Claude Code flags showed no 
 
 ### Automated tests
 
-110 tests pass: 91 Node tests and 19 Python tests. The Python tests also pass on `/usr/bin/python3` 3.9.6, which runs the LaunchAgent. The integration suite uses a deterministic stand-in for Claude Code plus the real MCP SDK client and server transport. New in 0.3.0:
+128 tests pass: 104 Node tests and 24 Python tests. The Python tests also pass on `/usr/bin/python3` 3.9.6, which runs the LaunchAgent. The integration suite uses a deterministic stand-in for Claude Code plus the real MCP SDK client and server transport. New in 0.3.0:
 
 - Each catalog model starts Claude Code with its own model, effort and display name; Haiku gets no effort flag.
 - Unknown models and unsupported efforts are refused with HTTP 400 before Claude Code starts.
@@ -60,6 +60,24 @@ The cache shares above are low because the prompts are tiny. In daily use with t
 `scripts/setup.py` built an isolated profile on port 19490. The app's own Codex runtime (`codex exec` from the app bundle) then ran one task per model: run `python3 -c 'print(17*19)'` with the shell tool and reply with the number. Haiku, Sonnet and Opus each called the tool and answered 323 (17,463, 23,074 and 23,066 tokens). Setup read the normal profile without changing it: `config.toml` and `models_cache.json` had the same hashes before and after.
 
 API key mode was checked with the fixture; the live checks used a Claude Code login.
+
+### Picker mode
+
+Picker mode points the app's built-in OpenAI provider at the bridge with `openai_base_url`. The choice was made after reading the Codex 0.160.0 source. A custom provider in `requires_openai_auth` mode, the other documented route, would change GPT: custom providers get no WebSocket transport by default, no remote compaction (only the `openai` provider gets remote compaction v2), and no internal tool metadata or workspace routing. With `openai_base_url` the app keeps its own provider, and the bridge relays GPT traffic unchanged. Workspace routing rewrites the provider URL only when it is `chatgpt.com` or was routed before, so it cannot route around the bridge.
+
+Fixture tests with stand-ins for OpenAI (HTTP and WebSocket) and Claude Code cover: GPT requests relayed byte for byte, including zstd bodies and the app's headers; the model list gaining the Claude entries with a tagged ETag, and `If-None-Match` and 304 handled; the handshake headers the app reads (`x-codex-turn-state`, `openai-model`, `x-reasoning-included`) passed through; a wrong key refused before anything reaches OpenAI; Claude over WebSocket with prewarm, a tool cycle sent as increments, `previous_response_not_found`, and an interrupt ending as `response.incomplete` followed by a resumed turn; remote compaction returning exactly one checkpoint item; that checkpoint turned into text for GPT; a GPT checkpoint replaced by a note for Claude; GPT's turns delivered to a resumed Claude session; OpenAI unreachable (502, failed handshake) and an expired login passed through as sent. Python tests show `picker.py` adds one marked line, backs up both files, refuses an existing `openai_base_url`, restores the original bytes on uninstall, and keeps later edits when the file changed.
+
+The app's own runtime (`codex exec` from the app bundle) then ran against a throwaway profile whose only special setting was `openai_base_url`, with a local stand-in for OpenAI that served the real GPT model list and answered GPT requests with fixed text. Real Claude Code answered every Claude request:
+
+| Check | Result |
+|---|---|
+| Claude Sonnet with a shell tool | Ran over the app's WebSocket; the hosted `web_search` tool in GPT's tool list was left out; answered 323 |
+| GPT through the relay | The prewarm and the incremental request reached the stand-in over WebSocket; its reply came back |
+| Forced compaction on Claude Haiku | Compacted mid-turn over WebSocket, continued in the next context window, and answered "HERON step-one step-two" |
+| Sonnet, then GPT, then Opus in one thread | Opus resumed Sonnet's native session with GPT's turn as history and answered: "The code word was KESTREL, and the previous assistant reply said exactly "FAKE-GPT over WebSocket"." |
+
+The checks against real OpenAI, in the app with a ChatGPT sign-in, follow once picker mode is installed on a real profile.
+
 
 ## Desktop and live checks in 0.2.0
 
@@ -197,4 +215,3 @@ The app runs `clock.sleep` itself, and a Stop during the sleep sends the bridge 
 - [Claude Code headless mode](https://code.claude.com/docs/en/headless)
 - [Claude models overview](https://platform.claude.com/docs/en/models/overview)
 - [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
-

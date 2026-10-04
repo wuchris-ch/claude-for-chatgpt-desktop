@@ -48,9 +48,14 @@ def children():
     if not pidfile.exists():return False
     return subprocess.run(['pgrep','-P',pidfile.read_text().strip()],capture_output=True).returncode==0
 
-# Stage all files before stopping the old process, and refuse to interrupt work.
-if children() or (health() or {}).get('active_sessions',0):
-    raise SystemExit('A Claude task is active. Run this installer again once the task finishes.')
+def busy():
+    state=health() or {}
+    return children() or state.get('active_sessions',0) or state.get('active_relays',0)
+
+# Stage all files before stopping the old process, and refuse to interrupt work:
+# in picker mode GPT responses stream through the bridge too.
+if busy():
+    raise SystemExit('A Claude or GPT response is streaming. Run this installer again once it finishes.')
 app=runtime/'app'
 stage=runtime/'app-staging'
 if stage.exists():shutil.rmtree(stage)
@@ -65,8 +70,8 @@ node=pathlib.Path(resolve_node(config.get('node')))
 config['node']=str(node)
 version=subprocess.check_output([str(node),'-p','process.versions.node'],text=True).strip()
 if int(version.split('.')[0])<24:raise SystemExit('Node.js 24 or later is required.')
-if children() or (health() or {}).get('active_sessions',0):
-    raise SystemExit('A Claude task started during staging. Run this installer again when it finishes.')
+if busy():
+    raise SystemExit('A response started during staging. Run this installer again when it finishes.')
 previous_version=(health() or {}).get('version')
 
 def stop_service():
@@ -111,4 +116,3 @@ def activate():
 stop_service()
 switch_release(app,stage,runtime/'launch.json',agent,activate,stop_service,lambda:start_service(previous_version))
 print(f'Installed {APP_NAME} {expected_version} as {label} on port {port}. macOS restarts it if it exits.')
-

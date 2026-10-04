@@ -565,3 +565,19 @@ test('a running native image history rebuilds once at the window boundary and th
  assert.equal([...b.sessions.values()][0].record.imageCutoff,cutoff);
  assert.equal(logs.filter(x=>x.event==='claude_start').at(-1).resume,true);
 });
+
+test('when GPT answers between two Claude turns, the resumed session receives its messages and tool activity',async t=>{
+ const {post,logs}=await setup(t);const first=request('remember fixture');
+ const a=output(await(await post(first)).text());
+ await waitUntil(()=>logs.some(x=>x.event==='claude_exit'));
+ const gpt=[{type:'reasoning',id:'rs_1',encrypted_content:'gAAAA-gpt'},{type:'message',role:'assistant',content:[{type:'output_text',text:'GPT checked the build'}]},
+  {type:'function_call',call_id:'call_gpt',name:'exec_command',arguments:'{"cmd":"make"}'},{type:'function_call_output',call_id:'call_gpt',output:'build ok'}];
+ const input=[...first.input,...a,request('gpt turn','u2').input[0],...gpt,request('echo-input back to claude','u3').input[0]];
+ const text=JSON.stringify(output(await(await post({...first,input})).text()));
+ assert.match(text,/other_model_turns/);assert.match(text,/GPT checked the build/);assert.match(text,/previous_tool_call.*make/);assert.match(text,/build ok/);
+ assert.doesNotMatch(text,/gAAAA-gpt/);
+ assert.equal(logs.filter(x=>x.event==='claude_start').at(-1).resume,true);
+ assert.ok(logs.some(x=>x.event==='other_model_turns'&&x.items===6));
+ assert.equal(logs.some(x=>x.event==='history_branch_rebuilt'),false);
+});
+

@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
 import {Session} from './session.mjs';
 import {createSearchHandler} from './search.mjs';
+import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
 import {digest, openCheckpoint, sealCheckpoint, validateRequestOptions} from './protocol.mjs';
 import {loadModels, effortFor} from './models.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
@@ -52,7 +53,9 @@ export function pruneToolSets(directory,now=Date.now()) {
 // auth.mode claude_login runs the user's own `claude` login untouched; api_key
 // passes auth.apiKey() to Claude Code as ANTHROPIC_API_KEY. The bridge never
 // reads Claude Code's credentials.
-export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000}) {
+// gatewayKey turns on picker mode, where the app's own OpenAI provider is
+// pointed at /g/<gatewayKey>/backend-api/codex (see gateway.mjs).
+export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000}) {
   if(!AUTH_MODES.includes(auth?.mode))throw new Error(`Unknown auth mode ${auth?.mode}. Use one of: ${AUTH_MODES.join(', ')}.`);
   if(auth.mode==='api_key'&&typeof auth.apiKey!=='function')throw new Error('API key mode needs an apiKey function.');
   fs.mkdirSync(stateDir,{recursive:true,mode:0o700});
@@ -81,12 +84,78 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     fs.writeFileSync(headerFile,JSON.stringify(names),{mode:0o600});capturedHeaders=true;
     log('search_header_names',{names});
   }});
+  const readBody=async req=>{
+    const chunks=[];let size=0;
+    for await(const chunk of req){size+=chunk.length;if(size>MAX_REQUEST_BYTES)throw Object.assign(new Error('Desktop request exceeds 256 MiB.'),{statusCode:413});chunks.push(chunk);}
+    return Buffer.concat(chunks);
+  };
+  const decode=(bytes,encoding)=>{
+    if(encoding==='zstd')return zstdDecompressSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
+    if(encoding==='gzip')return gunzipSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
+    if(encoding==='deflate')return inflateSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
+    if(encoding&&encoding!=='identity')throw new Error(`Unsupported content encoding ${encoding}`);
+    return bytes;
+  };
+  // One Claude request: from the separate window (/v1/responses), or from the
+  // app's own OpenAI provider in picker mode, over HTTP or WebSocket.
+  async function serveClaude(req,res,body) {
+    const model=models.get(body.model);
+    if(!model)return json(res,400,{error:{message:`Unknown model ${body.model}. This bridge serves ${models.list.map(m=>m.slug).join(', ')}. There is no fallback model.`}});
+    if(!Array.isArray(body.input)||body.stream!==true)return json(res,400,{error:{message:'Streaming Responses requests with an input array are required.'}});
+    const metadata=JSON.parse(req.headers['x-codex-turn-metadata']??'{}');
+    // Remote compaction, which the app uses with its own provider, ends the
+    // input with a compaction_trigger item.
+    const kind=metadata.request_kind==='compaction'||body.input.at(-1)?.type==='compaction_trigger'?'compaction':metadata.request_kind??'turn';
+    // In picker mode the tool list is the one GPT gets, which can include
+    // tools OpenAI runs on its servers. Claude cannot use those.
+    if(req.gateway&&Array.isArray(body.tools)) {
+      const hosted=body.tools.filter(t=>!['function','custom','namespace'].includes(t.type));
+      if(hosted.length){body={...body,tools:body.tools.filter(t=>!hosted.includes(t))};log('hosted_tools_omitted',{types:hosted.map(t=>t.type)});}
+    }
+    validateRequestOptions(kind==='compaction'?{...body,tools:[]}:body);
+    effortFor(model,body.reasoning?.effort);
+    const thread=req.headers['thread-id']??req.headers['session-id']??req.headers.session_id??body.prompt_cache_key;
+    if(!thread)return json(res,400,{error:{message:'A stable desktop thread identifier is required.'}});
+    const cacheFile=path.join(cacheDir,digest([thread,metadata.context_window_id,metadata.turn_id,kind,body])+'.sealed');
+    if(fs.existsSync(cacheFile)&&Date.now()-fs.statSync(cacheFile).mtimeMs<=86400000) {
+      const frames=openCheckpoint(fs.readFileSync(cacheFile,'utf8'),token);
+      bridge.log('response_replayed',{thread});res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});res.end(frames);return;
+    }
+    const checkpoints=body.input.filter(x=>x.type==='compaction'||x.type==='context_compaction');
+    const checkpointKey=checkpoints.length?digest(checkpoints.at(-1).encrypted_content):'none';
+    // A checkpoint written by GPT is encrypted by OpenAI and cannot be read here.
+    body={...body,input:body.input.map(x=>!['compaction','context_compaction'].includes(x.type)?x
+      :{type:'message',id:x.id,role:'user',content:[{type:'input_text',text:String(x.encrypted_content??'').startsWith(BRIDGE_CHECKPOINT)
+        ?'<context_checkpoint>\n'+openCheckpoint(x.encrypted_content,token)+'\n</context_checkpoint>\nContinue the existing task from this checkpoint.'
+        :'<context_checkpoint>Earlier conversation was compacted by another model. Its summary is encrypted for that model and is not available here; the messages kept after it follow. Ask the user if something important is missing.</context_checkpoint>'}]})};
+    if(kind==='compaction') {body.__bridge_compaction=true;body.tools=[];body.__bridge_turn_key=[thread,metadata.context_window_id??'default','turn',checkpointKey].join(':');}
+    body.__bridge_model=model;
+    const key=[thread,metadata.context_window_id??'default',kind,checkpointKey].join(':');
+    bridge.log('request',{model:model.slug,request_kind:kind,picker:req.gateway??false,window:metadata.window_number,tools:body.tools?.length,items:body.input.length});
+    if(!bridge.sessions.has(key))bridge.sessions.set(key,new Session(bridge,key));
+    await bridge.sessions.get(key).accept(body,res,frames=>{
+      try{const temp=cacheFile+'.tmp';fs.writeFileSync(temp,sealCheckpoint(frames,token),{mode:0o600});fs.renameSync(temp,cacheFile);}
+      catch(error){bridge.log('cache_persist_error',{message:error.message});}
+    });
+  }
+  const gateway=gatewayKey?createGateway({bridge,key:gatewayKey,upstream:gatewayUpstream,serve:serveClaude,log}):null;
   const server=http.createServer(async(req,res)=>{
     try {
       if(req.headers.origin)return json(res,403,{error:{message:'Browser-origin requests are not allowed.'}});
-      if(!authenticated(req))return json(res,401,{error:{message:'Bridge authentication required.'}});
       const url=new URL(req.url,bridge.url);
-      if(url.pathname==='/health')return json(res,200,{status:'ok',version:VERSION,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,sessions:bridge.sessions.size,active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length});
+      // Picker mode: the path carries the key, because the app's built-in
+      // provider cannot add headers.
+      if(url.pathname.startsWith('/g/')) {
+        const sub=gateway?gatewayPath(url.pathname,gatewayKey):null;
+        if(sub===null)return json(res,401,{error:{message:'Bridge authentication required.'}});
+        const raw=['GET','HEAD'].includes(req.method)?null:await readBody(req);
+        let decoded=null;
+        if(req.method==='POST'&&sub==='/responses'&&raw)try{decoded=JSON.parse(decode(raw,req.headers['content-encoding']).toString());}catch{}
+        return await gateway.handleHttp(req,res,sub,url,raw,decoded);
+      }
+      if(!authenticated(req))return json(res,401,{error:{message:'Bridge authentication required.'}});
+      if(url.pathname==='/health')return json(res,200,{status:'ok',version:VERSION,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway,sessions:bridge.sessions.size,
+        active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length,active_relays:gateway?.active()??0});
       if(url.pathname==='/v1/models')return json(res,200,{object:'list',data:models.list.map(m=>({id:m.slug,object:'model',owned_by:'anthropic',display_name:m.display_name}))});
       if(req.method==='POST'&&url.pathname==='/v1/alpha/search') {
         if(!bridge.webSearch)return json(res,404,{error:{message:'Web search is turned off for this bridge. Run setup again with --web-search to turn it on.'}});
@@ -94,13 +163,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
       }
       let body;
       if(req.method==='POST') {
-        const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>MAX_REQUEST_BYTES)throw Object.assign(new Error('Desktop request exceeds 256 MiB.'),{statusCode:413});chunks.push(chunk);}
-        let bytes=Buffer.concat(chunks);
-        const encoding=req.headers['content-encoding'];
-        if(encoding==='zstd')bytes=zstdDecompressSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
-        else if(encoding==='gzip')bytes=gunzipSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
-        else if(encoding==='deflate')bytes=inflateSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
-        else if(encoding&&encoding!=='identity')throw new Error(`Unsupported content encoding ${encoding}`);
+        const bytes=decode(await readBody(req),req.headers['content-encoding']);
         // Name the endpoint when a desktop feature posts a non-JSON body, so an
         // unsupported route can be identified from the log.
         try{body=JSON.parse(bytes.toString());}
@@ -118,43 +181,24 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         bridge.log('unsupported_endpoint',{path:url.pathname,fields:body?Object.keys(body):[],stream:body?.stream});
         return json(res,404,{error:{message:`Unsupported endpoint ${url.pathname}`}});
       }
-      const model=models.get(body.model);
-      if(!model)return json(res,400,{error:{message:`Unknown model ${body.model}. This bridge serves ${models.list.map(m=>m.slug).join(', ')}. There is no fallback model.`}});
-      if(!Array.isArray(body.input)||body.stream!==true)return json(res,400,{error:{message:'Streaming Responses requests with an input array are required.'}});
-      const metadata=JSON.parse(req.headers['x-codex-turn-metadata']??'{}');
-      validateRequestOptions(metadata.request_kind==='compaction'?{...body,tools:[]}:body);
-      effortFor(model,body.reasoning?.effort);
-      const thread=req.headers['thread-id']??req.headers['session-id']??body.prompt_cache_key;
-      if(!thread)return json(res,400,{error:{message:'A stable desktop thread identifier is required.'}});
-      const cacheFile=path.join(cacheDir,digest([thread,metadata.context_window_id,metadata.turn_id,metadata.request_kind,body])+'.sealed');
-      if(fs.existsSync(cacheFile)&&Date.now()-fs.statSync(cacheFile).mtimeMs<=86400000) {
-        const frames=openCheckpoint(fs.readFileSync(cacheFile,'utf8'),token);
-        bridge.log('response_replayed',{thread});res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});res.end(frames);return;
-      }
-      const checkpoints=body.input.filter(x=>x.type==='compaction'||x.type==='context_compaction');
-      const checkpointKey=checkpoints.length?digest(checkpoints.at(-1).encrypted_content):'none';
-      body.input=body.input.map(x=>['compaction','context_compaction'].includes(x.type)
-        ? {type:'message',id:x.id,role:'user',content:[{type:'input_text',text:'<context_checkpoint>\n'+openCheckpoint(x.encrypted_content,token)+'\n</context_checkpoint>\nContinue the existing task from this checkpoint.'}]}:x);
-      if(metadata.request_kind==='compaction') {body.__bridge_compaction=true;body.tools=[];body.__bridge_turn_key=[thread,metadata.context_window_id??'default','turn',checkpointKey].join(':');}
-      body.__bridge_model=model;
-      const key=[thread,metadata.context_window_id??'default',metadata.request_kind??'turn',checkpointKey].join(':');
-      bridge.log('request',{path:url.pathname,model:model.slug,request_kind:metadata.request_kind,window:metadata.window_number,tools:body.tools?.length,items:body.input.length});
-      if(!bridge.sessions.has(key))bridge.sessions.set(key,new Session(bridge,key));
-      await bridge.sessions.get(key).accept(body,res,frames=>{
-        try{const temp=cacheFile+'.tmp';fs.writeFileSync(temp,sealCheckpoint(frames,token),{mode:0o600});fs.renameSync(temp,cacheFile);}
-        catch(error){bridge.log('cache_persist_error',{message:error.message});}
-      });
+      return await serveClaude(req,res,body);
     } catch(error) {
       bridge.log('request_error',{message:error.message});
       if(!res.headersSent)json(res,error.statusCode??(error.code==='ERR_BUFFER_TOO_LARGE'?413:500),{error:{message:error.message}});
       else if(!res.writableEnded){res.write(`event: error\ndata: ${JSON.stringify({type:'error',message:error.message})}\n\n`);res.end();}
     }
   });
+  server.on('upgrade',(req,socket,head)=>{
+    const url=new URL(req.url,bridge.url);
+    const sub=gateway&&!req.headers.origin?gatewayPath(url.pathname,gatewayKey):null;
+    if(sub===null){socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
+    gateway.handleUpgrade(req,socket,head,sub,url);
+  });
   server.requestTimeout=0;server.timeout=0;
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
   bridge.url=`http://127.0.0.1:${server.address().port}`;
-  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);for(const s of bridge.sessions.values()){s.cancel('Bridge shutting down.');await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
-  log('bridge_ready',{url:bridge.url,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch});return bridge;
+  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();for(const s of bridge.sessions.values()){s.cancel('Bridge shutting down.');await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
+  log('bridge_ready',{url:bridge.url,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway});return bridge;
 }
 
 if(process.argv[1]===fileURLToPath(import.meta.url)) {
@@ -164,8 +208,12 @@ if(process.argv[1]===fileURLToPath(import.meta.url)) {
   const mode=process.env.CLAUDE_BRIDGE_AUTH??'claude_login';
   if(mode==='api_key'&&!process.env.ANTHROPIC_API_KEY)throw new Error('CLAUDE_BRIDGE_AUTH=api_key needs ANTHROPIC_API_KEY in the bridge environment.');
   const auth=mode==='api_key'?{mode,apiKey:()=>process.env.ANTHROPIC_API_KEY}:{mode};
+  // Picker mode is on once scripts/picker.py has created the gateway key.
+  const keyFile=path.join(runtime,'gateway-key');
+  const gatewayKey=fs.existsSync(keyFile)?fs.readFileSync(keyFile,'utf8').trim():null;
   const bridge=await startBridge({stateDir:path.join(runtime,'sessions'),token,port:Number(process.env.CLAUDE_BRIDGE_PORT??DEFAULT_PORT),claude:findClaude(),auth,
-    webSearch:process.env.CLAUDE_BRIDGE_WEB_SEARCH==='1',log:(event,data)=>process.stdout.write(JSON.stringify({time:new Date().toISOString(),event,...data})+'\n')});
+    webSearch:process.env.CLAUDE_BRIDGE_WEB_SEARCH==='1',gatewayKey,gatewayUpstream:process.env.CLAUDE_BRIDGE_GATEWAY_UPSTREAM||GATEWAY_UPSTREAM,
+    log:(event,data)=>process.stdout.write(JSON.stringify({time:new Date().toISOString(),event,...data})+'\n')});
   fs.writeFileSync(path.join(runtime,'bridge.pid'),String(process.pid),{mode:0o600});
   for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>bridge.close().then(()=>process.exit(0)));
 }

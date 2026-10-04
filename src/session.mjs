@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, normalizeTools, mcpResult, systemPrompt, userInput, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, resumeAfterStop, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
+import {digest, normalizeTools, mcpResult, systemPrompt, userInput, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, resumeAfterStop, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
 import {effortFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 
@@ -275,7 +275,9 @@ export class Session {
       input=resumeAfterStop(this.resumeItems,this.record.stop);
     } else if(this.record.started) {
       if(!fresh.length) throw new Error('No new user input. Replaying a completed request would duplicate the turn.');
-      input=userInput(this.withNotes(body.input,fresh,this.record.history),{prefix:false});
+      const other=otherModelTurns(body.input,this.record.history);
+      if(other)this.log('other_model_turns',{items:other.length});
+      input=other?[{type:'text',text:OTHER_MODEL_NOTE},...userInput(other,{replay:true,prefix:false})]:userInput(this.withNotes(body.input,fresh,this.record.history),{prefix:false});
     } else {
       const replay=body.input.some(x=>x.role==='assistant'||isResult(x)||['function_call','custom_tool_call'].includes(x.type));
       input=userInput(body.input,{replay});

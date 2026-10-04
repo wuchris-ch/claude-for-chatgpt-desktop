@@ -1,6 +1,6 @@
 # Claude for ChatGPT Desktop
 
-Use Claude Opus, Sonnet or Haiku as the model in the ChatGPT desktop app on macOS. Claude works with the app's own tools, the same ones GPT uses: the in-app browser, computer control, the terminal, file edits, plugins and connectors, with the app's approvals and tool cards. It runs on your Mac through the Claude Code CLI you already use.
+Use Claude Opus, Sonnet or Haiku in the ChatGPT desktop app on macOS, right in the model picker next to GPT. Claude works with the app's own tools, the same ones GPT uses: the in-app browser, computer control, the terminal, file edits, plugins and connectors, with the app's approvals and tool cards. It runs on your Mac through the Claude Code CLI you already use, and GPT chats keep working exactly as before.
 
 Unofficial and not affiliated with Anthropic or OpenAI. It runs your own Claude Code login, so usage counts against your Claude plan's limits like any other Claude Code session. See Anthropic's [legal and compliance notes for Claude Code](https://code.claude.com/docs/en/legal-and-compliance).
 
@@ -13,19 +13,23 @@ git clone https://github.com/wuchris-ch/claude-for-chatgpt-desktop.git
 cd claude-for-chatgpt-desktop
 npm ci
 python3 scripts/setup.py
-python3 scripts/launch.py
+python3 scripts/install.py
+python3 scripts/picker.py install
 ```
 
-The first launch installs a small background service, then opens a second ChatGPT window with its own profile. Sign into ChatGPT once in that window, choose **Claude Opus**, **Claude Sonnet** or **Claude Haiku** in the model picker, and start a task. Your usual ChatGPT window, its login and its conversations stay as they are.
+`install.py` installs a small background service. `picker.py install` backs up your ChatGPT settings and adds one setting to them. Quit and reopen ChatGPT, then choose **Claude Opus**, **Claude Sonnet** or **Claude Haiku** in the model picker of any chat. To undo it, run `python3 scripts/picker.py uninstall` and reopen ChatGPT.
 
-Afterwards, open the Claude window with `python3 scripts/launch.py` or by double-clicking **Open ChatGPT with Claude.command**.
+### Or a separate window
+
+To leave your usual ChatGPT window untouched, skip `picker.py` and run `python3 scripts/launch.py` (or double-click **Open ChatGPT with Claude.command**). It opens a second ChatGPT window with its own profile that uses only Claude. Sign into ChatGPT once in that window.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    UI[ChatGPT window, Claude profile] --> Runtime[App's agent runtime]
-    Runtime -->|Responses API stream| Bridge[Bridge on 127.0.0.1]
+    UI[ChatGPT window] --> Runtime[App's agent runtime]
+    Runtime -->|Responses API, HTTP or WebSocket| Bridge[Bridge on 127.0.0.1]
+    Bridge -->|GPT requests, unchanged| OpenAI[OpenAI]
     Bridge -->|stream-json| Claude[claude -p, one per thread]
     Claude -->|MCP tool call| Bridge
     Bridge -->|ordinary tool call| Runtime
@@ -33,10 +37,13 @@ flowchart LR
     Tools -->|text and images| Runtime
 ```
 
-The app's agent runtime talks to a model provider over the Responses API. The Claude profile points that provider at the bridge. For each conversation the bridge runs Claude Code in headless mode and offers it the app's tools over MCP. When Claude calls a tool, the bridge hands it to the app as an ordinary tool call; the app applies its approval rules, runs its own tool and returns the result, which the bridge passes to the waiting Claude process. The app bundle is not modified, and the bridge has no tools of its own.
+The app's agent runtime talks to OpenAI over the Responses API. In picker mode one setting, `openai_base_url`, points the app's own OpenAI connection at the bridge. The bridge passes every GPT request and response through unchanged, with the app's own login, WebSocket transport and remote compaction, and adds the Claude models to the model list the app downloads. When a request names a Claude model, the bridge answers it instead: for each conversation it runs Claude Code in headless mode and offers it the app's tools over MCP. When Claude calls a tool, the bridge hands it to the app as an ordinary tool call; the app applies its approval rules, runs its own tool and returns the result, which the bridge passes to the waiting Claude process. The app bundle is not modified, and the bridge has no tools of its own.
+
+The separate window works the same way through its own model provider, without the OpenAI relay.
 
 ## Features
 
+- Claude Opus, Sonnet and Haiku in the normal model picker, next to GPT. GPT requests reach OpenAI unchanged.
 - Claude drives the app's own tools, including the in-app browser and computer control, with the app's approvals and tool cards.
 - One warm Claude process per thread stays alive through a tool cycle and is resumed natively between turns, so the prompt cache carries the conversation. In daily use 97 to 98% of input tokens were read from the cache.
 - Messages you send while Claude is working reach the running turn, and Claude answers them in visible text before its next step.
@@ -44,9 +51,9 @@ The app's agent runtime talks to a model provider over the Responses API. The Cl
 - Compaction forks the live session so the summary reuses the cache, and the summary reaches the next context window.
 - Long browser and computer-control runs keep screenshot history bounded, and a stopped `clock.sleep` cannot hold a session forever.
 - Images, edits and regeneration, helper agents, review mode and generated titles work as they do with GPT.
-- You can switch between Claude models within a thread.
-- The app's built-in web search is available as an opt-in.
-- 110 automated tests, live checks against real Claude Code, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
+- Switch models within a thread: Claude sees what GPT said and did since its last turn, and GPT can read Claude's compaction summaries.
+- In the separate window, the app's built-in web search is available as an opt-in.
+- 128 automated tests, live checks against real Claude Code and the app's own runtime, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
 
 ## Compared with similar projects
 
@@ -54,7 +61,7 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 
 | Project | How Claude runs | Claude uses the app's browser and computer control | Notes |
 |---|---|---|---|
-| This project | Bridge on the app's model provider API; one warm `claude -p` per thread; the app's tools over MCP | Yes | Separate ChatGPT window with its own profile |
+| This project | Bridge on the app's model API; one warm `claude -p` per thread; the app's tools over MCP | Yes | Claude next to GPT in the normal picker with GPT traffic passed through unchanged, or a separate window |
 | [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex) (26 stars) | Claude Agent SDK in front of `codex app-server` | No evidence found; Claude uses Claude Code's own tools | Claude next to GPT in the picker, model switching mid-chat, the phone app, a curl installer, Stop, steering, compaction, side chats, plan mode |
 | [EthanSK/claude-in-codex](https://github.com/EthanSK/claude-in-codex) (0 stars) | `claude -p` per message with `--resume`; the app's tools over MCP | Untested: its README reports testing through Codex CLI | |
 | [wbopan/claude-in-codex](https://github.com/wbopan/claude-in-codex) (0 stars) | Menu bar app that hooks the app's internals through the Node inspector | Not documented | Notarized DMG; app version 26.924 disabled the hook |
@@ -64,7 +71,10 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 ## Limits
 
 - macOS only. Tested with ChatGPT 26.930.31730 (embedded Codex runtime 0.160.0), Claude Code 2.1.287 and Node.js 24.21. A later app or Claude Code release can change the protocols involved and need an update here.
-- Claude runs in the separate Claude window. Cloud tasks, voice, image generation and other OpenAI-hosted features stay with GPT.
+- Claude runs in local tasks. Cloud tasks, voice, image generation and other OpenAI-hosted features stay with GPT, and OpenAI-hosted tools in GPT's tool list (such as its built-in web search) are left out of Claude's.
+- In picker mode the app reaches OpenAI through the bridge. If the bridge service stops, GPT requests fail until launchd restarts it or you run `picker.py uninstall`. Picker mode needs a ChatGPT sign-in in the app, and it is not meant for ChatGPT workspaces with data-residency routing, which the app applies only when it talks to OpenAI directly.
+- A GPT compaction summary is encrypted for GPT. If a thread compacted by GPT switches to Claude, Claude gets the messages kept after the summary and a note that the summary is unavailable.
+- Helper agents whose model family differs from their parent's have not been tested.
 - Some request options are refused with an error instead of being ignored: forced tool choice, output-token caps, non-JSON text formats, and `parallel_tool_calls=false` with tools.
 - Claude Code's safety classifiers can re-run a flagged request on a fallback model, such as Opus 4.8 for Opus 5.5. The bridge then stops the turn with an explanation instead of switching models silently.
 - In long browser runs, older screenshots leave Claude's context in batches (the app keeps them), so Claude takes a fresh screenshot when it needs one.
@@ -73,6 +83,12 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 ## Configuration
 
 Run `python3 scripts/setup.py --help` for every option. Setup rewrites the Claude profile's settings each time it runs, then `python3 scripts/install.py` applies them to the service.
+
+### Picker mode
+
+`python3 scripts/picker.py install` changes one thing in your ChatGPT profile (`~/.codex`, or `$CODEX_HOME`): it adds a marked `openai_base_url` line to `config.toml`, pointing at the bridge with a private key in the path. It first saves `config.toml` and the app's cached model list to `backups/` in the runtime folder, and it refuses to run if you already set `openai_base_url` yourself.
+
+`python3 scripts/picker.py uninstall` restores `config.toml` byte for byte when nothing else in it changed, or otherwise removes only the marked line and keeps your later edits, and restores the cached model list. `python3 scripts/picker.py status` shows whether picker mode is on. Reopen ChatGPT after either change.
 
 ### Models
 
@@ -134,20 +150,22 @@ Everything lives in `~/Library/Application Support/Claude for ChatGPT Desktop/`:
 | `user-data/` | The Claude window's browser and app state |
 | `sessions/` | Native session records, system prompts and an encrypted retry cache that expires after 24 hours |
 | `logs/` | Request, model, tool-name and lifecycle metadata, and service errors |
-| `launch.json`, `token` | Settings from setup, and the local key between the app and the bridge |
+| `launch.json`, `token`, `gateway-key` | Settings from setup, and the local keys between the app and the bridge |
+| `picker.json`, `backups/` | Picker mode's record of what it changed, and the backups it restores |
 
 Claude Code keeps its own session transcripts as usual.
 
 ## Security and privacy
 
 - The bridge listens only on 127.0.0.1, requires a random local key, and refuses requests from browsers.
-- Claude Code manages its own login. The app's ChatGPT credentials never reach Claude, and with web search off the bridge never forwards them anywhere.
+- Claude Code manages its own login. The app's ChatGPT credentials never reach Claude. In picker mode the bridge passes them, with the rest of each GPT request, only to OpenAI at `chatgpt.com`.
 - Logs hold request, model, tool-name and lifecycle metadata. They never contain prompts, tool arguments, tool results, tokens or keys.
-- Your usual ChatGPT profile in `~/.codex` is only read, to copy its settings and plugins into the Claude profile.
+- Apart from the one setting picker mode adds, your usual ChatGPT profile in `~/.codex` is only read, to copy its settings and plugins into the separate window's profile.
 
 ## Uninstall
 
 ```sh
+python3 scripts/picker.py uninstall          # take Claude out of the normal picker
 python3 scripts/uninstall.py                 # stop and remove the service, keep the Claude profile
 python3 scripts/uninstall.py --delete-data   # also delete the Claude profile, history and logs
 ```
@@ -160,16 +178,17 @@ GPT's `apply_patch` output is constrained by a grammar that MCP cannot carry, so
 
 Between user turns Claude Code resumes the saved session. Before resuming, the bridge checks the app's transcript against what the session saw. Edits, undo, regeneration and failed turns rebuild from the app's transcript; a turn stopped by the user or cut off by a bridge restart resumes its native session. While Claude thinks or writes a long tool call, the bridge sends a no-op event every 10 seconds so the app's stall timer does not fire.
 
-Switching Claude models between turns resumes the same native session on the new model; that first request cannot reuse the previous model's cache. A compaction keeps the model the session ran on, so its cache still applies.
+Switching Claude models between turns resumes the same native session on the new model; that first request cannot reuse the previous model's cache. If GPT answered in between, its messages and tool activity are passed to the resumed session as history. A compaction keeps the model the session ran on, so its cache still applies.
+
+Over the app's WebSocket, the bridge connects to OpenAI during the handshake so the headers the app reads from it (turn routing, server model) arrive unchanged, then routes each `response.create` by model. For Claude it rebuilds the full input from the increments the app sends after the first request, answers prewarm requests without inference, and treats `response.interrupt` as a Stop. A Claude compaction summary is a sealed item only the bridge can open, so it is turned back into text before a GPT request leaves for OpenAI.
 
 ## Development
 
 ```sh
-npm test               # 110 tests with a stand-in for Claude Code
+npm test               # 128 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # nine short, low-effort checks with real Claude Code
 ```
 
 ## License
 
 [MIT](LICENSE)
-

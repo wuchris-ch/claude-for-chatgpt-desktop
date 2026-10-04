@@ -51,3 +51,12 @@ test('effort defaults per model, and models without effort take none',()=>{
  assert.throws(()=>effortFor(models.get('claude-opus'),'ultra'),e=>e.statusCode===400&&/Claude Opus does not support ultra effort\. Choose one of: low, medium, high, xhigh, max\./.test(e.message));
 });
 
+test('the bridge and the Python setup build the same catalog entries',async()=>{
+ const {catalogEntries}=await import('../src/catalog.mjs');
+ const {execFileSync}=await import('node:child_process');
+ const template={slug:'gpt-fixture',tool_mode:'code_mode_only',priority:7,input_modalities:['text','image'],model_messages:{instructions_template:'You are Codex, a coding agent.\nRules.'},service_tiers:['flex']};
+ const script='import json,sys\nsys.path.insert(0,"scripts")\nfrom sync_runtime import model_catalog\nfrom bridge_config import load_models\nprint(json.dumps(model_catalog(json.loads(sys.argv[1]),load_models())))';
+ const python=JSON.parse(execFileSync('python3',['-c',script,JSON.stringify(template)],{cwd:new URL('..',import.meta.url),encoding:'utf8'}));
+ assert.deepEqual(catalogEntries(template,loadModels()),python);
+});
+
