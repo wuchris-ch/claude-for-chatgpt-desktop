@@ -1,0 +1,45 @@
+{
+  "_comment": "Claude models offered in the ChatGPT desktop picker. claude_model is passed to `claude --model`: an alias (opus, sonnet, haiku) follows Claude Code to new releases, a full model id pins one version. efforts lists the reasoning levels the model accepts; an empty list means the model has no effort setting.",
+  "default": "claude-opus",
+  "models": [
+    {
+      "slug": "claude-opus",
+      "claude_model": "opus",
+      "display_name": "Claude Opus",
+      "description": "Latest Claude Opus through Claude Code. Most capable for long agentic work.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "context_window": 1000000
+    },
+    {
+      "slug": "claude-sonnet",
+      "claude_model": "sonnet",
+      "display_name": "Claude Sonnet",
+      "description": "Latest Claude Sonnet through Claude Code. Fast and capable.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "context_window": 1000000
+    },
+    {
+      "slug": "claude-haiku",
+      "claude_model": "haiku",
+      "display_name": "Claude Haiku",
+      "description": "Latest Claude Haiku through Claude Code. Fastest, for simple tasks.",
+      "efforts": [],
+      "default_effort": null,
+      "context_window": 200000
+    }
+  ]
+}

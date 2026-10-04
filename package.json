@@ -1,0 +1,38 @@
+{
+  "name": "claude-for-chatgpt-desktop",
+  "version": "0.3.0",
+  "description": "Use Claude Opus, Sonnet or Haiku as the model in the ChatGPT desktop app on macOS, with the app's own tools, through your Claude Code login.",
+  "license": "MIT",
+  "author": "wuchris-ch",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wuchris-ch/claude-for-chatgpt-desktop.git"
+  },
+  "homepage": "https://github.com/wuchris-ch/claude-for-chatgpt-desktop#readme",
+  "bugs": {
+    "url": "https://github.com/wuchris-ch/claude-for-chatgpt-desktop/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "chatgpt",
+    "codex",
+    "mcp",
+    "macos"
+  ],
+  "type": "module",
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs && python3 -m unittest discover -s test -p 'test_*.py'",
+    "test:live": "node e2e/live.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.1"
+  }
+}
