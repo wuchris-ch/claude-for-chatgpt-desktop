@@ -2,6 +2,10 @@
 
 Use Claude Opus, Sonnet or Haiku in the ChatGPT desktop app on macOS, right in the model picker next to GPT. Claude works with the app's own tools, the same ones GPT uses: the in-app browser, computer control, the terminal, file edits, plugins and connectors, with the app's approvals and tool cards. It runs on your Mac through the Claude Code CLI you already use, and GPT chats keep working exactly as before.
 
+![Animated walkthrough: choosing Claude Opus in the model picker, Claude running the tests and reading a page in the in-app browser, and a message sent while it works](docs/demo.gif)
+
+The full 50-second walkthrough, including switching back to GPT in the same chat: [docs/demo.mp4](docs/demo.mp4)
+
 Unofficial and not affiliated with Anthropic or OpenAI. It runs your own Claude Code login, so usage counts against your Claude plan's limits like any other Claude Code session. See Anthropic's [legal and compliance notes for Claude Code](https://code.claude.com/docs/en/legal-and-compliance).
 
 ## Install
@@ -29,7 +33,7 @@ To leave your usual ChatGPT window untouched, skip `picker.py` and run `python3 
 flowchart LR
     UI[ChatGPT window] --> Runtime[App's agent runtime]
     Runtime -->|Responses API, HTTP or WebSocket| Bridge[Bridge on 127.0.0.1]
-    Bridge -->|GPT requests, unchanged| OpenAI[OpenAI]
+    Bridge -->|GPT requests| OpenAI[OpenAI]
     Bridge -->|stream-json| Claude[claude -p, one per thread]
     Claude -->|MCP tool call| Bridge
     Bridge -->|ordinary tool call| Runtime
@@ -37,13 +41,13 @@ flowchart LR
     Tools -->|text and images| Runtime
 ```
 
-The app's agent runtime talks to OpenAI over the Responses API. In picker mode one setting, `openai_base_url`, points the app's own OpenAI connection at the bridge. The bridge passes every GPT request and response through unchanged, with the app's own login, WebSocket transport and remote compaction, and adds the Claude models to the model list the app downloads. When a request names a Claude model, the bridge answers it instead: for each conversation it runs Claude Code in headless mode and offers it the app's tools over MCP. When Claude calls a tool, the bridge hands it to the app as an ordinary tool call; the app applies its approval rules, runs its own tool and returns the result, which the bridge passes to the waiting Claude process. The app bundle is not modified, and the bridge has no tools of its own.
+The app's agent runtime talks to OpenAI over the Responses API. In picker mode one setting, `openai_base_url`, points the app's own OpenAI connection at the bridge. The bridge relays GPT requests and responses with the app's own login, WebSocket transport and remote compaction, and adds the Claude models to the model list the app downloads. A chat that only uses GPT reaches OpenAI exactly as the app sends it. In a chat where Claude also answered, the bridge turns Claude's compaction summaries into text and drops the item ids it created, because OpenAI cannot read either. When a request names a Claude model, the bridge answers it instead: for each conversation it runs Claude Code in headless mode and offers it the app's tools over MCP. When Claude calls a tool, the bridge hands it to the app as an ordinary tool call; the app applies its approval rules, runs its own tool and returns the result, which the bridge passes to the waiting Claude process. The app bundle is not modified, and the bridge has no tools of its own.
 
 The separate window works the same way through its own model provider, without the OpenAI relay.
 
 ## Features
 
-- Claude Opus, Sonnet and Haiku in the normal model picker, next to GPT. GPT requests reach OpenAI unchanged.
+- Claude Opus, Sonnet and Haiku in the normal model picker, next to GPT, which keeps its own login, WebSocket connection and compaction.
 - Claude drives the app's own tools, including the in-app browser and computer control, with the app's approvals and tool cards.
 - One warm Claude process per thread stays alive through a tool cycle and is resumed natively between turns, so the prompt cache carries the conversation. In daily use 97 to 98% of input tokens were read from the cache.
 - Messages you send while Claude is working reach the running turn, and Claude answers them in visible text before its next step.
@@ -61,7 +65,7 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 
 | Project | How Claude runs | Claude uses the app's browser and computer control | Notes |
 |---|---|---|---|
-| This project | Bridge on the app's model API; one warm `claude -p` per thread; the app's tools over MCP | Yes | Claude next to GPT in the normal picker with GPT traffic passed through unchanged, or a separate window |
+| This project | Bridge on the app's model API; one warm `claude -p` per thread; the app's tools over MCP | Yes | Claude next to GPT in the normal picker with GPT traffic relayed to OpenAI, or a separate window |
 | [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex) (26 stars) | Claude Agent SDK in front of `codex app-server` | No evidence found; Claude uses Claude Code's own tools | Claude next to GPT in the picker, model switching mid-chat, the phone app, a curl installer, Stop, steering, compaction, side chats, plan mode |
 | [EthanSK/claude-in-codex](https://github.com/EthanSK/claude-in-codex) (0 stars) | `claude -p` per message with `--resume`; the app's tools over MCP | Untested: its README reports testing through Codex CLI | |
 | [wbopan/claude-in-codex](https://github.com/wbopan/claude-in-codex) (0 stars) | Menu bar app that hooks the app's internals through the Node inspector | Not documented | Notarized DMG; app version 26.924 disabled the hook |
