@@ -2,7 +2,36 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode; its checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. The newest checks come first.
+
+## Release 0.3.1, checked October 4, 2026
+
+The components are the same as for 0.3.0 below. Version 0.3.1 adds Claude Fable and puts the model version in each picker name.
+
+| Picker entry | Alias | Model Claude Code started | Context window | Effort levels |
+|---|---|---|---|---|
+| Claude Fable 5.1 | `fable` | `claude-fable-5-1` | 1,000,000 | low to max, default high |
+| Claude Opus 5.5 | `opus` | `claude-opus-5-5` | 1,000,000 | low to max, default medium |
+| Claude Sonnet 5.5 | `sonnet` | `claude-sonnet-5-5` | 1,000,000 | low to max, default medium |
+| Claude Haiku 4.5 | `haiku` | `claude-haiku-4-5-20251001` | 200,000 | none |
+
+A one-line probe of `claude --model fable` used only `claude-fable-5-1` and reported a context window of 1,000,000 tokens. Fable starts at high effort, which is Claude Code's own default for Fable 5.1 according to [Anthropic's announcement](https://www.anthropic.com/claude-fable-and-mythos-5-1), and accepts all five levels according to the [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort).
+
+An alias entry's name ends with the version Claude Code last started for it. The bridge records that model in `sessions/started-models.json`, so a name survives a restart, and the model list's ETag changes with the names, so the app downloads the list again. The record only names entries. After a restart an alias stays unpinned until Claude Code starts it again, so it still moves to a new release.
+
+### Automated tests in 0.3.1
+
+135 tests pass: 108 Node tests and 27 Python tests. The Python tests also pass on `/usr/bin/python3` 3.9.6. New in 0.3.1:
+
+- The shipped catalog lists Fable, Opus, Sonnet and Haiku with versioned names, and Fable starts at high effort.
+- Versions are read from model ids: `claude-fable-5-1` is 5.1 and `claude-haiku-4-5-20251001` is 4.5. An entry that pins a model id keeps its catalog name.
+- A new version from an alias renames its entry in `/v1/models`, in the app's model list and in Claude's identity line. The name survives a restart, and the alias is not pinned by it.
+- The bridge and the Python setup build the same entries and names.
+- Fable is pinned to the model Claude Code started, like the other aliases.
+
+### Live checks in 0.3.1
+
+Through the installed service on the real ChatGPT profile, the app's own `codex app-server` listed the 8 GPT models and then Claude Fable 5.1, Claude Opus 5.5, Claude Sonnet 5.5 and Claude Haiku 4.5. In one ephemeral thread, GPT ran a shell command and answered 323, then Claude Fable at low effort ran another over the app's WebSocket and answered 1147. Claude Code reported `claude-fable-5-1`.
 
 ## Release 0.3.0, checked October 4, 2026
 

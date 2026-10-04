@@ -100,15 +100,30 @@ test('the model list gains the Claude entries and keeps its cache validation',as
  const response=await fetch(base+'/models?client_version=9',{headers:app});
  const etag=response.headers.get('etag');assert.match(etag,/^W\/"models-1-claude-[0-9a-f]{10}"$/);
  const list=(await response.json()).models;
- assert.deepEqual(list.map(m=>m.slug),['gpt-plain','gpt-fixture','claude-opus','claude-sonnet','claude-haiku']);
- const opus=list[2];
- assert.deepEqual([opus.display_name,opus.priority,opus.context_window,opus.auto_compact_token_limit,opus.tool_mode],['Claude Opus',4,1000000,800000,'code_mode_only']);
- assert.match(opus.model_messages.instructions_template,/^You are Claude Opus, running as the main assistant in ChatGPT Desktop\..*\nRules\.$/s);
+ assert.deepEqual(list.map(m=>m.slug),['gpt-plain','gpt-fixture','claude-fable','claude-opus','claude-sonnet','claude-haiku']);
+ const opus=list[3];
+ assert.deepEqual([opus.display_name,opus.priority,opus.context_window,opus.auto_compact_token_limit,opus.tool_mode],['Claude Opus 5.5',5,1000000,800000,'code_mode_only']);
+ assert.match(opus.model_messages.instructions_template,/^You are Claude Opus 5\.5, running as the main assistant in ChatGPT Desktop\..*\nRules\.$/s);
+ assert.deepEqual(list.slice(2).map(m=>m.display_name),['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5']);
  assert.equal(openai.seen.http[0].headers['accept-encoding'],'identity');
  const again=await fetch(base+'/models?client_version=9',{headers:{...app,'If-None-Match':etag}});
  assert.equal(again.status,304);assert.equal(again.headers.get('etag'),etag);
  assert.equal(openai.seen.http[1].headers['if-none-match'],'W/"models-1"');
  assert.deepEqual(withClaudeModels([{slug:'no-template'}],loadModels()),[{slug:'no-template'}]);
+});
+
+test('a new Claude version renames its entry and makes the app download the list again',async t=>{
+ const {bridge,openai,base,app}=await setup(t);
+ const first=await fetch(base+'/models?client_version=9',{headers:app});
+ const etag=first.headers.get('etag');await first.json();
+ bridge.modelStarted('claude-fable','claude-fable-5-5');
+ const after=await fetch(base+'/models?client_version=9',{headers:{...app,'If-None-Match':etag}});
+ assert.equal(after.status,200);
+ assert.notEqual(after.headers.get('etag'),etag);assert.match(after.headers.get('etag'),/^W\/"models-1-claude-[0-9a-f]{10}"$/);
+ const fable=(await after.json()).models.find(m=>m.slug==='claude-fable');
+ assert.equal(fable.display_name,'Claude Fable 5.5');
+ assert.match(fable.model_messages.instructions_template,/^You are Claude Fable 5\.5, running/);
+ assert.equal(openai.seen.http.length,2);
 });
 
 test('a wrong key is refused before anything reaches OpenAI',async t=>{

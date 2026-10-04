@@ -1,6 +1,6 @@
 # Claude for ChatGPT Desktop
 
-Use Claude Opus, Sonnet or Haiku in the ChatGPT desktop app on macOS, right in the model picker next to GPT. Claude works with the app's own tools, the same ones GPT uses: the in-app browser, computer control, the terminal, file edits, plugins and connectors, with the app's approvals and tool cards. It runs on your Mac through the Claude Code CLI you already use, and GPT chats keep working exactly as before.
+Use Claude Fable, Opus, Sonnet or Haiku in the ChatGPT desktop app on macOS, right in the model picker next to GPT. Claude works with the app's own tools, the same ones GPT uses: the in-app browser, computer control, the terminal, file edits, plugins and connectors, with the app's approvals and tool cards. It runs on your Mac through the Claude Code CLI you already use, and GPT chats keep working exactly as before.
 
 ![Animated walkthrough: choosing Claude Opus in the model picker, Claude running the tests and reading a page in the in-app browser, and a message sent while it works](docs/demo.gif)
 
@@ -21,7 +21,7 @@ python3 scripts/install.py
 python3 scripts/picker.py install
 ```
 
-`install.py` installs a small background service. `picker.py install` backs up your ChatGPT settings and adds one setting to them. Quit and reopen ChatGPT, then choose **Claude Opus**, **Claude Sonnet** or **Claude Haiku** in the model picker of any chat. To undo it, run `python3 scripts/picker.py uninstall` and reopen ChatGPT.
+`install.py` installs a small background service. `picker.py install` backs up your ChatGPT settings and adds one setting to them. Quit and reopen ChatGPT, then choose **Claude Fable 5.1**, **Claude Opus 5.5**, **Claude Sonnet 5.5** or **Claude Haiku 4.5** in the model picker of any chat. To undo it, run `python3 scripts/picker.py uninstall` and reopen ChatGPT.
 
 ### Or a separate window
 
@@ -47,7 +47,7 @@ The separate window works the same way through its own model provider, without t
 
 ## Features
 
-- Claude Opus, Sonnet and Haiku in the normal model picker, next to GPT, which keeps its own login, WebSocket connection and compaction.
+- Claude Fable, Opus, Sonnet and Haiku in the normal model picker, each named with the version Claude Code runs, next to GPT, which keeps its own login, WebSocket connection and compaction.
 - Claude drives the app's own tools, including the in-app browser and computer control, with the app's approvals and tool cards.
 - One warm Claude process per thread stays alive through a tool cycle and is resumed natively between turns, so the prompt cache carries the conversation. In daily use 97 to 98% of input tokens were read from the cache.
 - Messages you send while Claude is working reach the running turn, and Claude answers them in visible text before its next step.
@@ -57,7 +57,7 @@ The separate window works the same way through its own model provider, without t
 - Images, edits and regeneration, helper agents, review mode and generated titles work as they do with GPT.
 - Switch models within a thread: Claude sees what GPT said and did since its last turn, and GPT can read Claude's compaction summaries.
 - In the separate window, the app's built-in web search is available as an opt-in.
-- 131 automated tests, live checks against real Claude Code, real OpenAI and the app's own runtime, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
+- 135 automated tests, live checks against real Claude Code, real OpenAI and the app's own runtime, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
 
 ## Compared with similar projects
 
@@ -96,7 +96,7 @@ Run `python3 scripts/setup.py --help` for every option. Setup rewrites the Claud
 
 ### Models
 
-[claude-models.json](claude-models.json) lists the picker entries. Each `claude_model` is passed to `claude --model`. The aliases `opus`, `sonnet` and `haiku` follow Claude Code to new releases; on October 4, 2026 they started `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-4-5-20251001`. To pin a version or add a model, copy the file, edit it, and pass it to setup:
+[claude-models.json](claude-models.json) lists the picker entries. Each `claude_model` is passed to `claude --model`. The aliases `fable`, `opus`, `sonnet` and `haiku` follow Claude Code to new releases; on October 4, 2026 they started `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-4-5-20251001`. The picker names each alias entry after the version Claude Code last started for it, so Claude Fable 5.1 becomes Claude Fable 5.5 after the first chat on the new release. To pin a version or add a model, copy the file, edit it, and pass it to setup:
 
 ```json
 {"slug": "claude-opus-5-5", "claude_model": "claude-opus-5-5", "display_name": "Claude Opus 5.5",
@@ -189,7 +189,7 @@ Over the app's WebSocket, the bridge connects to OpenAI during the handshake so 
 ## Development
 
 ```sh
-npm test               # 131 tests with stand-ins for Claude Code and OpenAI
+npm test               # 135 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # nine short, low-effort checks with real Claude Code
 ```
 

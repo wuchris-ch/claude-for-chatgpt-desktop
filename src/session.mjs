@@ -7,7 +7,7 @@ import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
 import {digest, normalizeTools, mcpResult, systemPrompt, userInput, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, resumeAfterStop, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
-import {effortFor, startedModelMatches} from './models.mjs';
+import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 
 // The desktop already sized each tool result for the model. Past its own
@@ -210,7 +210,7 @@ export class Session {
     // The desktop keeps one model for a turn. A different model while a
     // native process waits on a tool result restarts from the transcript.
     if(this.child&&this.record.model!==model.slug)await this.reset('model_changed');
-    const prompt=systemPrompt(body,{name:model.display_name,webSearch:this.bridge.webSearch});
+    const prompt=systemPrompt(body,{name:labelFor(model,this.bridge.startedModels?.get(model.slug)),webSearch:this.bridge.webSearch});
     if(this.child&&this.record.instructions!==digest(prompt))await this.reset('instructions_changed');
     // Stop during host tool execution has no open model HTTP stream to abort.
     // A subsequent user message without results abandons that waiting cycle.
@@ -305,7 +305,7 @@ export class Session {
     // Once Claude Code has reported the model an alias starts, every internal
     // model choice is pinned to it, so one model does all the work.
     const pinned=this.bridge.resolvedModels.get(runModel.slug)??(runModel.family?null:runModel.claude_model);
-    if(pinned)Object.assign(env,{ANTHROPIC_DEFAULT_OPUS_MODEL:pinned,ANTHROPIC_DEFAULT_SONNET_MODEL:pinned,ANTHROPIC_DEFAULT_HAIKU_MODEL:pinned,CLAUDE_CODE_SUBAGENT_MODEL:pinned});
+    if(pinned)Object.assign(env,{ANTHROPIC_DEFAULT_FABLE_MODEL:pinned,ANTHROPIC_DEFAULT_OPUS_MODEL:pinned,ANTHROPIC_DEFAULT_SONNET_MODEL:pinned,ANTHROPIC_DEFAULT_HAIKU_MODEL:pinned,CLAUDE_CODE_SUBAGENT_MODEL:pinned});
     Object.assign(env,{CLAUDE_CODE_DISABLE_AUTO_MEMORY:'1',DISABLE_AUTOUPDATER:'1',
       // The desktop owns tool timeouts and yields. Claude Code's ~60 s MCP default
       // otherwise abandons long host tools while the desktop keeps running them.
@@ -365,7 +365,7 @@ export class Session {
     }
     if(msg.type==='system'&&msg.subtype==='init') {
       if(!startedModelMatches(this.runModel,msg.model))throw new Error(`Claude Code started ${msg.model} for ${this.runModel.display_name} (${this.runModel.claude_model}). The bridge does not switch models silently.`);
-      this.activeModel=msg.model;this.bridge.resolvedModels.set(this.runModel.slug,msg.model);
+      this.activeModel=msg.model;this.bridge.resolvedModels.set(this.runModel.slug,msg.model);this.bridge.modelStarted?.(this.runModel.slug,msg.model);
       const host=msg.mcp_servers?.find(x=>x.name==='chatgpt');
       if(this.tools.length && host?.status!=='connected')throw new Error('Claude could not connect to the desktop tool relay.');
       // Claude Code reports init only after it has recorded the turn's input.

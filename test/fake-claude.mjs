@@ -8,8 +8,8 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 const arg=name=>process.argv[process.argv.indexOf(name)+1];
 // Like Claude Code, an alias resolves through the ANTHROPIC_DEFAULT_*_MODEL
 // pins or its built-in table. FAKE_CLAUDE_MODEL simulates a substituted model.
-const ALIASES={opus:'claude-opus-5-5',sonnet:'claude-sonnet-5-5',haiku:'claude-haiku-4-5-20251001'};
-const PINS={opus:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,haiku:process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL};
+const ALIASES={fable:'claude-fable-5-1',opus:'claude-opus-5-5',sonnet:'claude-sonnet-5-5',haiku:'claude-haiku-4-5-20251001'};
+const PINS={fable:process.env.ANTHROPIC_DEFAULT_FABLE_MODEL,opus:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,haiku:process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL};
 const requested=arg('--model');
 const model=process.env.FAKE_CLAUDE_MODEL||PINS[requested]||ALIASES[requested]||requested;
 const config=JSON.parse(arg('--mcp-config')).mcpServers.chatgpt;
@@ -52,7 +52,7 @@ input.on('line',async line=>{
  if(request.includes('model-probe')){
   const prompt=fs.readFileSync(arg('--system-prompt-file'),'utf8');
   text('MODEL '+JSON.stringify({requested,model,effort:process.argv.includes('--effort')?arg('--effort'):null,resume:process.argv.includes('--resume'),
-   pins:{opus:PINS.opus??null,sonnet:PINS.sonnet??null,haiku:PINS.haiku??null,subagent:process.env.CLAUDE_CODE_SUBAGENT_MODEL??null},
+   pins:{fable:PINS.fable??null,opus:PINS.opus??null,sonnet:PINS.sonnet??null,haiku:PINS.haiku??null,subagent:process.env.CLAUDE_CODE_SUBAGENT_MODEL??null},
    identity:/You are ([^,]+), the main assistant/.exec(prompt)?.[1]??null,webSearch:prompt.includes('tools.web__run')||prompt.includes('web_run tool')}));return;
  }
  // Claude Code re-running a flagged request on a fallback model mid-turn.

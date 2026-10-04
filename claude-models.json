@@ -1,12 +1,27 @@
 {
-  "_comment": "Claude models offered in the ChatGPT desktop picker. claude_model is passed to `claude --model`: an alias (opus, sonnet, haiku) follows Claude Code to new releases, a full model id pins one version. efforts lists the reasoning levels the model accepts; an empty list means the model has no effort setting.",
+  "_comment": "Claude models offered in the ChatGPT desktop picker. claude_model is passed to `claude --model`: an alias (fable, opus, sonnet, haiku) follows Claude Code to new releases, a full model id pins one version. For an alias, the version at the end of display_name is a starting point: once Claude Code starts a model for it, the picker shows that model's version. efforts lists the reasoning levels the model accepts; an empty list means the model has no effort setting.",
   "default": "claude-opus",
   "models": [
     {
+      "slug": "claude-fable",
+      "claude_model": "fable",
+      "display_name": "Claude Fable 5.1",
+      "description": "Latest Claude Fable through Claude Code. Most capable, for ambitious long-running work.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000
+    },
+    {
       "slug": "claude-opus",
       "claude_model": "opus",
-      "display_name": "Claude Opus",
-      "description": "Latest Claude Opus through Claude Code. Most capable for long agentic work.",
+      "display_name": "Claude Opus 5.5",
+      "description": "Latest Claude Opus through Claude Code. Strong at long agentic work.",
       "efforts": [
         "low",
         "medium",
@@ -20,7 +35,7 @@
     {
       "slug": "claude-sonnet",
       "claude_model": "sonnet",
-      "display_name": "Claude Sonnet",
+      "display_name": "Claude Sonnet 5.5",
       "description": "Latest Claude Sonnet through Claude Code. Fast and capable.",
       "efforts": [
         "low",
@@ -35,7 +50,7 @@
     {
       "slug": "claude-haiku",
       "claude_model": "haiku",
-      "display_name": "Claude Haiku",
+      "display_name": "Claude Haiku 4.5",
       "description": "Latest Claude Haiku through Claude Code. Fastest, for simple tasks.",
       "efforts": [],
       "default_effort": null,

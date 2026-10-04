@@ -10,6 +10,7 @@ import {timingSafeEqual} from 'node:crypto';
 import {WebSocketServer, WebSocket} from 'ws';
 import {digest, uid, isBridgeId, openCheckpoint} from './protocol.mjs';
 import {catalogEntries, pickTemplate} from './catalog.mjs';
+import {labeled} from './models.mjs';
 
 export const GATEWAY_UPSTREAM='https://chatgpt.com/backend-api/codex';
 const ROUTE='/backend-api/codex';
@@ -192,7 +193,10 @@ class ClaudeChannel {
 }
 
 export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()=>{}}) {
-  const tag=catalogTag(bridge.models);
+  // Entries are named after the model each alias last started, and the tag
+  // changes with the names, so the app downloads the list again.
+  const current=()=>labeled(bridge.models,bridge.startedModels);
+  const tagNow=()=>catalogTag(current());
   // GPT responses in flight, so an install or restart can wait for them.
   let active=0;
   const track=promise=>{active++;return Promise.resolve(promise).finally(()=>{active--;});};
@@ -206,7 +210,7 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
       const data=JSON.parse(body.toString());
       if(!Array.isArray(data.models))return {status,headers,body};
       delete headers['content-encoding'];
-      return {status,headers,body:Buffer.from(JSON.stringify({...data,models:withClaudeModels(data.models,bridge.models)}))};
+      return {status,headers,body:Buffer.from(JSON.stringify({...data,models:withClaudeModels(data.models,current())}))};
     } catch {return {status,headers,body};}
   }
 
@@ -214,13 +218,13 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
   async function handleHttp(req,res,sub,url,raw,decoded) {
     const target=upstream+sub+url.search;
     if(req.method==='POST'&&sub==='/responses'&&decoded&&bridge.models.get(decoded.model))return serve({headers:req.headers,method:req.method,gateway:'http'},res,decoded);
-    if(req.method==='GET'&&sub==='/models')return relayHttp(req,res,target,null,{tag,finish:models,log});
+    if(req.method==='GET'&&sub==='/models')return relayHttp(req,res,target,null,{tag:tagNow(),finish:models,log});
     let body=raw;
     if(req.method==='POST'&&sub.startsWith('/responses')&&decoded) {
       const prepared=prepareForOpenAI(decoded.input,bridge.token);
       if(prepared){body=Buffer.from(JSON.stringify({...decoded,input:prepared.input}));delete req.headers['content-encoding'];logPrepared(log,prepared,'http');}
     }
-    return track(relayHttp(req,res,target,body,{tag,log}));
+    return track(relayHttp(req,res,target,body,{tag:tagNow(),log}));
   }
 
   // WebSocket: OpenAI is connected first, so the handshake headers the app
@@ -234,7 +238,7 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     up.on('upgrade',response=>{
       for(const [name,value] of Object.entries(response.headers)) {
         if(HANDSHAKE.has(name)||name==='set-cookie'||name==='date'||name==='server')continue;
-        for(const v of [value].flat())extra.push(`${name}: ${name==='x-models-etag'?tagEtag(v,tag):v}`);
+        for(const v of [value].flat())extra.push(`${name}: ${name==='x-models-etag'?tagEtag(v,tagNow()):v}`);
       }
     });
     up.on('unexpected-response',(request,response)=>{
@@ -279,7 +283,7 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
       if(pending&&!isBinary&&/"type"\s*:\s*"(response\.(completed|failed|incomplete)|error)"/.test(data.toString().slice(0,200)))settle(1);
       if(!isBinary&&data.includes('x-models-etag'))try{
         const event=JSON.parse(data.toString());const headers=event.headers;
-        if(headers&&typeof headers==='object')for(const name of Object.keys(headers))if(name.toLowerCase()==='x-models-etag')headers[name]=tagEtag(headers[name],tag);
+        if(headers&&typeof headers==='object')for(const name of Object.keys(headers))if(name.toLowerCase()==='x-models-etag')headers[name]=tagEtag(headers[name],tagNow());
         data=Buffer.from(JSON.stringify(event));
       }catch{}
       if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});
@@ -292,5 +296,5 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     up.on('error',()=>{});client.on('error',()=>{});
   }
 
-  return {tag,handleHttp,handleUpgrade,active:()=>active,close:()=>{for(const c of wss.clients)c.terminate();wss.close();}};
+  return {get tag(){return tagNow();},handleHttp,handleUpgrade,active:()=>active,close:()=>{for(const c of wss.clients)c.terminate();wss.close();}};
 }

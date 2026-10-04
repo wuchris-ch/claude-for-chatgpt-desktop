@@ -433,31 +433,33 @@ test('unknown auth modes are refused at startup',async()=>{
 });
 test('each catalog model starts Claude Code with its own model, effort and name; Haiku gets no effort flag',async t=>{
  const {post,logs}=await setup(t);
+ const fable=await probe(post,'model-probe',{model:'claude-fable'},'t-fable');
+ assert.deepEqual([fable.requested,fable.model,fable.effort,fable.identity],['fable','claude-fable-5-1','high','Claude Fable 5.1']);
  const opus=await probe(post,'model-probe',{},'t-opus');
- assert.deepEqual({requested:opus.requested,model:opus.model,effort:opus.effort,identity:opus.identity,webSearch:opus.webSearch},{requested:'opus',model:'claude-opus-5-5',effort:'medium',identity:'Claude Opus',webSearch:false});
+ assert.deepEqual({requested:opus.requested,model:opus.model,effort:opus.effort,identity:opus.identity,webSearch:opus.webSearch},{requested:'opus',model:'claude-opus-5-5',effort:'medium',identity:'Claude Opus 5.5',webSearch:false});
  const sonnet=await probe(post,'model-probe',{model:'claude-sonnet',reasoning:{effort:'high'}},'t-sonnet');
- assert.deepEqual([sonnet.requested,sonnet.model,sonnet.effort,sonnet.identity],['sonnet','claude-sonnet-5-5','high','Claude Sonnet']);
+ assert.deepEqual([sonnet.requested,sonnet.model,sonnet.effort,sonnet.identity],['sonnet','claude-sonnet-5-5','high','Claude Sonnet 5.5']);
  const haiku=await probe(post,'model-probe',{model:'claude-haiku',reasoning:{effort:'medium'}},'t-haiku');
- assert.deepEqual([haiku.requested,haiku.model,haiku.effort,haiku.identity],['haiku','claude-haiku-4-5-20251001',null,'Claude Haiku']);
- assert.deepEqual(logs.filter(x=>x.event==='claude_start').map(x=>[x.model,x.claude_model,x.effort]),[['claude-opus','opus','medium'],['claude-sonnet','sonnet','high'],['claude-haiku','haiku',null]]);
- assert.deepEqual(logs.filter(x=>x.event==='turn_complete').map(x=>x.model),['claude-opus-5-5','claude-sonnet-5-5','claude-haiku-4-5-20251001']);
+ assert.deepEqual([haiku.requested,haiku.model,haiku.effort,haiku.identity],['haiku','claude-haiku-4-5-20251001',null,'Claude Haiku 4.5']);
+ assert.deepEqual(logs.filter(x=>x.event==='claude_start').map(x=>[x.model,x.claude_model,x.effort]),[['claude-fable','fable','high'],['claude-opus','opus','medium'],['claude-sonnet','sonnet','high'],['claude-haiku','haiku',null]]);
+ assert.deepEqual(logs.filter(x=>x.event==='turn_complete').map(x=>x.model),['claude-fable-5-1','claude-opus-5-5','claude-sonnet-5-5','claude-haiku-4-5-20251001']);
 });
 test('unknown models and unsupported efforts are refused before Claude Code starts',async t=>{
  const {post,logs}=await setup(t);
  const unknown=await post({...request('x'),model:'claude-opus-5-5'});assert.equal(unknown.status,400);
- assert.match((await unknown.json()).error.message,/Unknown model claude-opus-5-5\. This bridge serves claude-opus, claude-sonnet, claude-haiku\. There is no fallback model\./);
+ assert.match((await unknown.json()).error.message,/Unknown model claude-opus-5-5\. This bridge serves claude-fable, claude-opus, claude-sonnet, claude-haiku\. There is no fallback model\./);
  const effort=await post({...request('x'),model:'claude-sonnet',reasoning:{effort:'ultra'}});assert.equal(effort.status,400);
- assert.match((await effort.json()).error.message,/Claude Sonnet does not support ultra effort/);
+ assert.match((await effort.json()).error.message,/Claude Sonnet 5\.5 does not support ultra effort/);
  assert.equal(logs.some(x=>x.event==='claude_start'),false);
 });
 test('an alias is pinned to the model Claude Code first started for it',async t=>{
  const {post}=await setup(t);
  const first=request('model-probe');
  const a=output(await(await post(first)).text());
- assert.deepEqual(JSON.parse(a[0].content[0].text.slice(6)).pins,{opus:null,sonnet:null,haiku:null,subagent:null});
+ assert.deepEqual(JSON.parse(a[0].content[0].text.slice(6)).pins,{fable:null,opus:null,sonnet:null,haiku:null,subagent:null});
  const second=JSON.parse(output(await(await post({...first,input:[...first.input,...a,...request('model-probe again','user2').input]})).text())[0].content[0].text.slice(6));
  assert.equal(second.resume,true);
- assert.deepEqual(second.pins,{opus:'claude-opus-5-5',sonnet:'claude-opus-5-5',haiku:'claude-opus-5-5',subagent:'claude-opus-5-5'});
+ assert.deepEqual(second.pins,{fable:'claude-opus-5-5',opus:'claude-opus-5-5',sonnet:'claude-opus-5-5',haiku:'claude-opus-5-5',subagent:'claude-opus-5-5'});
 });
 test('an alias accepts another version of its family; a pinned id or another family is refused',async t=>{
  withEnv(t,{FAKE_CLAUDE_MODEL:'claude-opus-5-6'});
@@ -466,7 +468,25 @@ test('an alias accepts another version of its family; a pinned id or another fam
  const pinned=await setup(t,{models:parseModels({models:[{slug:'opus-pinned',claude_model:'claude-opus-5-5',display_name:'Claude Opus 5.5',efforts:['low','medium'],context_window:1000000}]})});
  assert.match(failure(await(await pinned.post({...request('hello'),model:'opus-pinned'})).text()),/Claude Code started claude-opus-5-6 for Claude Opus 5\.5 \(claude-opus-5-5\)\. The bridge does not switch models silently\./);
  process.env.FAKE_CLAUDE_MODEL='claude-sonnet-5-5';
- assert.match(failure(await(await alias.post(request('hello','u9'),{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'other-family'}})).text()),/started claude-sonnet-5-5 for Claude Opus \(opus\)/);
+ assert.match(failure(await(await alias.post(request('hello','u9'),{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'other-family'}})).text()),/started claude-sonnet-5-5 for Claude Opus 5\.5 \(opus\)/);
+});
+test('a new version from an alias renames its entry, and the name survives a restart without pinning the alias',async t=>{
+ withEnv(t,{FAKE_CLAUDE_MODEL:'claude-opus-5-6'});
+ const {b,dir,post}=await setup(t);
+ const names=async bridge=>(await(await fetch(bridge.url+'/v1/models',{headers:{Authorization:'Bearer fixture-secret'}})).json()).data.map(m=>m.display_name);
+ assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ const first=await probe(post,'model-probe',{},'t-new');
+ assert.equal(first.identity,'Claude Opus 5.5');
+ assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ assert.equal((await probe(post,'model-probe',{},'t-next')).identity,'Claude Opus 5.6');
+ assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir,'started-models.json'),'utf8')),{'claude-opus':'claude-opus-5-6'});
+ await b.close();
+ const again=await startBridge({stateDir:dir,token:'fixture-secret',port:0,claude:fixture});
+ t.after(()=>again.close());
+ assert.deepEqual(await names(again),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ assert.equal(again.resolvedModels.size,0);
+ const restarted=await probe((body,extra)=>fetch(again.url+'/v1/responses',{method:'POST',body:JSON.stringify(body),...extra}),'model-probe',{},'t-restart');
+ assert.deepEqual([restarted.identity,restarted.pins.opus],['Claude Opus 5.6',null]);
 });
 test('a fallback model mid-turn fails the turn instead of switching silently',async t=>{
  const {post,logs}=await setup(t);
@@ -477,7 +497,7 @@ test('switching Claude models between turns resumes the native session on the ne
  const {post,logs}=await setup(t);const first=request('model-probe');
  const a=output(await(await post(first)).text());
  const next=JSON.parse(output(await(await post({...first,model:'claude-sonnet',input:[...first.input,...a,...request('model-probe on sonnet','user2').input]})).text())[0].content[0].text.slice(6));
- assert.deepEqual([next.requested,next.model,next.resume,next.identity],['sonnet','claude-sonnet-5-5',true,'Claude Sonnet']);
+ assert.deepEqual([next.requested,next.model,next.resume,next.identity],['sonnet','claude-sonnet-5-5',true,'Claude Sonnet 5.5']);
  assert.ok(logs.some(x=>x.event==='model_switched'&&x.from==='claude-opus'&&x.to==='claude-sonnet'));
  assert.equal(logs.some(x=>['history_branch_rebuilt','regeneration_rebuilt','error'].includes(x.event)),false);
 });
@@ -498,9 +518,9 @@ test('a compaction fork keeps the session model even when the desktop asks with 
 });
 test('the models endpoint and health check list the catalog, auth mode and search setting',async t=>{
  const {b}=await setup(t);const get=p=>fetch(b.url+p,{headers:{Authorization:'Bearer fixture-secret'}}).then(r=>r.json());
- assert.deepEqual((await get('/v1/models')).data.map(m=>[m.id,m.display_name]),[['claude-opus','Claude Opus'],['claude-sonnet','Claude Sonnet'],['claude-haiku','Claude Haiku']]);
+ assert.deepEqual((await get('/v1/models')).data.map(m=>[m.id,m.display_name]),[['claude-fable','Claude Fable 5.1'],['claude-opus','Claude Opus 5.5'],['claude-sonnet','Claude Sonnet 5.5'],['claude-haiku','Claude Haiku 4.5']]);
  const health=await get('/health');
- assert.deepEqual([health.models,health.auth,health.web_search],[['claude-opus','claude-sonnet','claude-haiku'],'claude_login',false]);
+ assert.deepEqual([health.models,health.auth,health.web_search],[['claude-fable','claude-opus','claude-sonnet','claude-haiku'],'claude_login',false]);
 });
 test('Claude Code is found through CLAUDE_BIN, then PATH, with an install hint when missing',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'claude-bin-'));const bin=path.join(dir,'claude');
@@ -580,4 +600,3 @@ test('when GPT answers between two Claude turns, the resumed session receives it
  assert.ok(logs.some(x=>x.event==='other_model_turns'&&x.items===6));
  assert.equal(logs.some(x=>x.event==='history_branch_rebuilt'),false);
 });
-

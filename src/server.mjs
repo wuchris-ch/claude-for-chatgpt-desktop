@@ -9,7 +9,7 @@ import {Session} from './session.mjs';
 import {createSearchHandler} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
 import {digest, openCheckpoint, sealCheckpoint, validateRequestOptions} from './protocol.mjs';
-import {loadModels, effortFor} from './models.mjs';
+import {loadModels, effortFor, labelFor} from './models.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const MAX_REQUEST_BYTES=256*1024*1024;
 export const DEFAULT_PORT=19480;
@@ -67,6 +67,20 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   // resolvedModels maps a catalog slug to the model Claude Code last started
   // for it, so later processes pin aliases to the same version.
   const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
+  // startedModels keeps the same record across restarts, for the names the
+  // picker shows only. Pinning starts empty, so an alias still follows Claude
+  // Code to a new release after a restart.
+  const startedFile=path.join(stateDir,'started-models.json');
+  let started={};
+  try{started=JSON.parse(fs.readFileSync(startedFile,'utf8'));}catch{}
+  bridge.startedModels=new Map(Object.entries(started).filter(([slug,id])=>models.get(slug)&&typeof id==='string'));
+  bridge.modelStarted=(slug,id)=>{
+    if(bridge.startedModels.get(slug)===id)return;
+    bridge.startedModels.set(slug,id);
+    try{const temp=startedFile+'.tmp';fs.writeFileSync(temp,JSON.stringify(Object.fromEntries(bridge.startedModels),null,2),{mode:0o600});fs.renameSync(temp,startedFile);}
+    catch(error){log('started_models_persist_error',{message:error.message});}
+  };
+  bridge.label=model=>labelFor(model,bridge.startedModels.get(model.slug));
   // Looked up on first use, so a bridge without Claude Code fails per request
   // with an install hint. The service passes the path it found at startup.
   let claudePath=claude;
@@ -156,7 +170,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
       if(!authenticated(req))return json(res,401,{error:{message:'Bridge authentication required.'}});
       if(url.pathname==='/health')return json(res,200,{status:'ok',version:VERSION,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway,sessions:bridge.sessions.size,
         active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length,active_relays:gateway?.active()??0});
-      if(url.pathname==='/v1/models')return json(res,200,{object:'list',data:models.list.map(m=>({id:m.slug,object:'model',owned_by:'anthropic',display_name:m.display_name}))});
+      if(url.pathname==='/v1/models')return json(res,200,{object:'list',data:models.list.map(m=>({id:m.slug,object:'model',owned_by:'anthropic',display_name:bridge.label(m)}))});
       if(req.method==='POST'&&url.pathname==='/v1/alpha/search') {
         if(!bridge.webSearch)return json(res,404,{error:{message:'Web search is turned off for this bridge. Run setup again with --web-search to turn it on.'}});
         return await search(req,res);

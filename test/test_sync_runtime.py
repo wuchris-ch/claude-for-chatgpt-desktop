@@ -69,7 +69,7 @@ class PluginIsolationTests(unittest.TestCase):
         self.assertTrue((self.codex/'config.toml').read_text().startswith('model_reasoning_effort = "medium"\n'))
         self.assertIn('web_search = "disabled"',(self.codex/'config.toml').read_text())
         model = json.loads((self.codex/'models.json').read_text())['models'][0]
-        self.assertEqual(model['slug'],'claude-opus')
+        self.assertEqual(model['slug'],'claude-fable')
         self.assertTrue(model['supports_search_tool'])
         self.assertEqual(refresh_capabilities(self.source,self.codex)['mcp_descriptors_rewritten'],0)
 
@@ -138,17 +138,30 @@ class PluginIsolationTests(unittest.TestCase):
     def test_catalog_lists_each_claude_model_with_its_own_levels_and_window(self):
         refresh_capabilities(self.source,self.codex)
         models={m['slug']:m for m in json.loads((self.codex/'models.json').read_text())['models']}
-        self.assertEqual(list(models),['claude-opus','claude-sonnet','claude-haiku'])
-        opus,sonnet,haiku=models.values()
+        self.assertEqual(list(models),['claude-fable','claude-opus','claude-sonnet','claude-haiku'])
+        fable,opus,sonnet,haiku=models.values()
+        self.assertEqual([x['effort'] for x in fable['supported_reasoning_levels']],['low','medium','high','xhigh','max'])
         self.assertEqual([x['effort'] for x in opus['supported_reasoning_levels']],['low','medium','high','xhigh','max'])
-        self.assertEqual((opus['default_reasoning_level'],sonnet['default_reasoning_level']),('medium','medium'))
+        self.assertEqual((fable['default_reasoning_level'],opus['default_reasoning_level'],sonnet['default_reasoning_level']),('high','medium','medium'))
         self.assertEqual([x['effort'] for x in haiku['supported_reasoning_levels']],['medium'])
         self.assertIn('no effort setting',haiku['supported_reasoning_levels'][0]['description'])
-        self.assertEqual([(m['context_window'],m['auto_compact_token_limit']) for m in models.values()],[(1000000,800000),(1000000,800000),(200000,160000)])
-        self.assertEqual([m['priority'] for m in models.values()],[1,2,3])
-        self.assertTrue(haiku['model_messages']['instructions_template'].startswith('You are Claude Haiku, running as the main assistant in ChatGPT Desktop.'))
+        self.assertEqual([(m['context_window'],m['auto_compact_token_limit']) for m in models.values()],[(1000000,800000),(1000000,800000),(1000000,800000),(200000,160000)])
+        self.assertEqual([m['priority'] for m in models.values()],[1,2,3,4])
+        self.assertTrue(haiku['model_messages']['instructions_template'].startswith('You are Claude Haiku 4.5, running as the main assistant in ChatGPT Desktop.'))
         self.assertTrue(haiku['model_messages']['instructions_template'].endswith('\nBe helpful.'))
-        self.assertEqual(opus['display_name'],'Claude Opus')
+        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5'])
+
+    def test_names_follow_the_versions_the_bridge_recorded(self):
+        state=self.codex.parent/'sessions'
+        state.mkdir()
+        (state/'started-models.json').write_text(json.dumps({'claude-fable':'claude-fable-5-5','claude-opus':'claude-sonnet-5-5'}))
+        refresh_capabilities(self.source,self.codex)
+        models={m['slug']:m for m in json.loads((self.codex/'models.json').read_text())['models']}
+        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.5','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5'])
+        self.assertTrue(models['claude-fable']['model_messages']['instructions_template'].startswith('You are Claude Fable 5.5, running'))
+        (state/'started-models.json').write_text('not json')
+        refresh_capabilities(self.source,self.codex)
+        self.assertEqual(json.loads((self.codex/'models.json').read_text())['models'][0]['display_name'],'Claude Fable 5.1')
 
     def test_missing_model_list_explains_what_to_do(self):
         (self.source/'models_cache.json').unlink()

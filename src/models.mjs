@@ -47,6 +47,29 @@ export function startedModelMatches(model,actual) {
   return actual.replace(/\[1m\]$/i,'')===model.claude_model.replace(/\[1m\]$/i,'');
 }
 
+// Claude Code model ids carry their version: claude-fable-5-1, claude-opus-5,
+// claude-haiku-4-5-20251001. Returns "5.1", "5" or "4.5", or null for an id of
+// another family or shape.
+export function versionOf(id,family) {
+  const m=/^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$/i.exec(typeof id==='string'?id:'');
+  if(!m||(family&&m[1].toLowerCase()!==family))return null;
+  return m[3]?`${m[2]}.${m[3]}`:m[2];
+}
+
+// An alias entry is named after the model Claude Code last started for it, so
+// "Claude Fable 5.1" reads "Claude Fable 5.5" once Claude Code moves the alias
+// on. An entry that pins a model id keeps the name its catalog gives it.
+export function labelFor(model,started) {
+  const version=model.family?versionOf(started,model.family):null;
+  return version?`${model.display_name.replace(/\s+\d+(?:\.\d+)*$/,'')} ${version}`:model.display_name;
+}
+
+// The catalog list with each entry named by labelFor. started maps a slug to
+// the model id Claude Code last started for it.
+export function labeled(models,started=new Map()) {
+  return {...models,list:models.list.map(m=>({...m,display_name:labelFor(m,started.get(m.slug))}))};
+}
+
 // Haiku-class models have no effort setting: the desktop's fixed level is
 // accepted and nothing is passed to Claude Code.
 export function effortFor(model,requested) {
@@ -56,4 +79,3 @@ export function effortFor(model,requested) {
     throw Object.assign(new Error(`${model.display_name} does not support ${effort} effort. Choose one of: ${model.efforts.join(', ')}.`),{statusCode:400});
   return effort;
 }
-

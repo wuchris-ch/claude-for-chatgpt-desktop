@@ -14,6 +14,26 @@ from bridge_config import PROVIDER_ID, load_models, runtime_dir, load_launch
 # Claude's own limit, so its summary request still fits.
 AUTO_COMPACT_SHARE = 0.8
 IDENTITY = 'You are {name}, running as the main assistant in ChatGPT Desktop. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled.'
+# Same rules as familyOf, versionOf and labelFor in src/models.mjs.
+FAMILIES = ('opus', 'sonnet', 'haiku', 'fable')
+MODEL_ID = re.compile(r'^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$', re.I)
+
+def label_for(m, started=None):
+    """An alias entry is named after the model Claude Code last started for it."""
+    family = re.sub(r'\[1m\]$', '', m['claude_model'], flags=re.I).lower()
+    match = MODEL_ID.match(started or '') if family in FAMILIES else None
+    if not match or match.group(1).lower() != family:
+        return m['display_name']
+    version = match.group(2) + ('.' + match.group(3) if match.group(3) else '')
+    return re.sub(r'\s+\d+(?:\.\d+)*$', '', m['display_name']) + ' ' + version
+
+def load_started(runtime):
+    """The models Claude Code last started for each entry, as the bridge records them."""
+    try:
+        value = json.loads((pathlib.Path(runtime)/'sessions'/'started-models.json').read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(v, str)} if isinstance(value, dict) else {}
 
 def set_standalone_search(codex, enabled=True):
     """Change only the three search settings, retaining comments and preferences.
@@ -48,11 +68,13 @@ def set_standalone_search(codex, enabled=True):
 def enable_standalone_search(codex):
     return set_standalone_search(codex, True)
 
-def model_catalog(template, models):
+def model_catalog(template, models, started=None):
     """Desktop catalog entries for the Claude models, built from a GPT entry."""
+    started = started or {}
     entries=[]
     for priority,m in enumerate(models['models'],start=1):
         model=copy.deepcopy(template)
+        name=label_for(m, started.get(m['slug']))
         efforts=m.get('efforts') or []
         # The desktop expects at least one level. Models without an effort
         # setting get one fixed level, which the bridge does not pass on.
@@ -61,7 +83,7 @@ def model_catalog(template, models):
         window=int(m['context_window'])
         # Tool search defers connector tools to ALL_TOOLS inside exec, as for GPT.
         # Without it every request inlined about 145k tokens of app documentation.
-        model.update(slug=m['slug'], display_name=m['display_name'], description=m.get('description',''),
+        model.update(slug=m['slug'], display_name=name, description=m.get('description',''),
                      default_reasoning_level=default, supported_reasoning_levels=levels,
                      additional_speed_tiers=[], service_tiers=[], available_access_programs={'cyber':[]}, availability_nux=None,
                      context_window=window, max_context_window=window, auto_compact_token_limit=int(window*AUTO_COMPACT_SHARE),
@@ -69,7 +91,7 @@ def model_catalog(template, models):
                      multi_agent_reasoning_effort=default, upgrade=None, priority=priority, visibility='list')
         messages = model.get('model_messages')
         if messages and messages.get('instructions_template'):
-            messages['instructions_template'] = re.sub(r'^You are Codex[^\n]*', lambda _: IDENTITY.format(name=m['display_name']),
+            messages['instructions_template'] = re.sub(r'^You are Codex[^\n]*', lambda _: IDENTITY.format(name=name),
                 messages['instructions_template'], count=1)
         entries.append(model)
     return entries
@@ -181,7 +203,8 @@ def refresh_capabilities(source, codex, models=None, web_search=False):
     if template is None:
         raise RuntimeError('No code-mode model found in '+str(cache)+'. This ChatGPT version is not supported yet.')
     target=codex/'models.json'
-    value=json.dumps({'models':model_catalog(template, models)},indent=2)
+    # The isolated profile lives in the runtime directory, next to the bridge's state.
+    value=json.dumps({'models':model_catalog(template, models, load_started(codex.parent))},indent=2)
     model_changed=not target.exists() or target.read_text()!=value
     if model_changed:
         temp=target.with_suffix('.json.tmp');temp.write_text(value);temp.replace(target)
