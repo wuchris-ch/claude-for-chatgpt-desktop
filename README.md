@@ -2,7 +2,7 @@
 
 Use Claude Fable, Opus, Sonnet or Haiku in the ChatGPT desktop app on macOS, right in the model picker next to GPT. Claude works with the app's own tools, the same ones GPT uses: the in-app browser, computer control, the terminal, file edits, plugins and connectors, with the app's approvals and tool cards. It runs on your Mac through the Claude Code CLI you already use, and GPT chats keep working exactly as before.
 
-![Animated walkthrough: choosing Claude Opus in the model picker, Claude running the tests and reading a page in the in-app browser, and a message sent while it works](docs/demo.gif)
+![Animated walkthrough: choosing Claude Fable 5.1 in the model picker, Claude running the tests and reading a page in the in-app browser, and a message sent while it works](docs/demo.gif)
 
 The full 50-second walkthrough, including switching back to GPT in the same chat: [docs/demo.mp4](docs/demo.mp4)
 
