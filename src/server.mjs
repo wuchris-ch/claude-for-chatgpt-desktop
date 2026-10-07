@@ -209,6 +209,12 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     gateway.handleUpgrade(req,socket,head,sub,url);
   });
   server.requestTimeout=0;server.timeout=0;
+  // Node closes an idle keep-alive socket after 5 s plus a 1 s buffer. Claude
+  // Code reuses its MCP sockets and sent a tool call on one just as it closed,
+  // about 6 s after the previous result: the call failed with ECONNRESET while
+  // the desktop already ran it, and the session was rebuilt from the
+  // transcript. Clients on this local port close their own idle sockets.
+  server.keepAliveTimeout=0;
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
   bridge.url=`http://127.0.0.1:${server.address().port}`;
   bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();for(const s of bridge.sessions.values()){s.cancel('Bridge shutting down.');await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};

@@ -259,6 +259,10 @@ Claude Code shows a message sent during a turn to the model with the next tool r
 
 The app runs `clock.sleep` itself, and a Stop during the sleep sends the bridge nothing, so Claude Code waited on a stopped 15-minute sleep and held the session. The bridge now stops the turn once a sleep's stated duration plus five minutes has passed with no result. Live with a 5-second grace, a 20-second sleep that was never answered was stopped at 27.9 seconds, and the next message resumed the same session.
 
+## Tool calls reset on a reused connection, in 0.3.2
+
+Claude Code's call to the tool relay sometimes failed 25 to 130 ms after it was sent with `ECONNRESET: The socket connection was closed unexpectedly`. Claude Code recorded the tool as failed and started its next request, so the bridge saw Claude advance with no open desktop response, stopped the process and rebuilt the conversation from the desktop transcript, writing its whole prompt cache again, while the desktop had already been handed the call and ran it. In the separate-window bridge's transcripts from October 2 to 6 there were 13 such resets; 4 came 5.9 to 6.0 s after the previous tool result, a window that holds about 4% of all tool calls. Node 24.21 closes an idle keep-alive socket after `keepAliveTimeout` (5,000 ms) plus `keepAliveTimeoutBuffer` (1,000 ms), and Claude Code reuses its MCP sockets, so a call sent at that moment lands on a socket the server is closing. The others came 2 to 5 s after the last result, which fits a second pooled socket that had been idle longer. The server now disables its keep-alive timeout; its clients on this local port close their own idle sockets. A test holds a keep-alive socket idle for 6.5 s and reuses it; it fails on 0.3.1.
+
 ## References
 
 - [Claude Code model configuration](https://code.claude.com/docs/en/model-config)

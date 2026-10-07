@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -48,6 +49,18 @@ test('wrong model, missing authentication, and browser origins are rejected',asy
  assert.equal((await fetch(b.url+'/health')).status,401);
  assert.equal((await fetch(b.url+'/health',{headers:{Authorization:'Bearer fixture-secret',Origin:'https://example.com'}})).status,403);
  assert.equal((await post({...request('x'),model:'some-other-model'})).status,400);
+});
+test('an idle keep-alive connection stays open past Node\'s default timeout, so a reused socket is not reset',async t=>{
+ const {b}=await setup(t);const {port}=new URL(b.url);
+ const socket=net.connect(Number(port),'127.0.0.1');t.after(()=>socket.destroy());
+ let data='',closed=false;socket.on('data',d=>data+=d);socket.on('close',()=>closed=true);
+ const ask=()=>socket.write('GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer fixture-secret\r\nConnection: keep-alive\r\n\r\n');
+ await new Promise(r=>socket.once('connect',r));ask();
+ for(let i=0;i<40&&!data.includes('"status":"ok"');i++)await new Promise(r=>setTimeout(r,25));
+ await new Promise(r=>setTimeout(r,6500));
+ assert.equal(closed,false);data='';ask();
+ for(let i=0;i<40&&!data.includes('"status":"ok"');i++)await new Promise(r=>setTimeout(r,25));
+ assert.match(data,/"status":"ok"/);
 });
 test('authenticated desktop zstd requests use a separate bridge header',async t=>{
  const {b}=await setup(t);const res=await fetch(b.url+'/v1/responses',{method:'POST',headers:{'X-Claude-Bridge-Key':'fixture-secret',Authorization:'Bearer desktop-token-not-forwarded','Content-Type':'application/json','Content-Encoding':'zstd','thread-id':'compressed'},body:zstdCompressSync(Buffer.from(JSON.stringify(request('compressed input'))))});
