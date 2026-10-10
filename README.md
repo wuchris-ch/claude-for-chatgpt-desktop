@@ -146,6 +146,13 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 | [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) (0 stars) | Claude Agent SDK as a model provider | Not documented | No images or compaction for Claude |
 | [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) (16.9k stars), [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (54k stars) | General model proxies | Only through raw OAuth tokens or an API key | With raw Claude OAuth tokens: Anthropic blocked third-party use on January 9, 2026 and has billed it as extra usage since April 4, 2026. Their `claude` CLI mode is stateless and has no tools |
 
+<details>
+<summary>Why not just ask Claude or Codex to build one?</summary>
+
+You can, and a basic bridge works in an afternoon. The hard part is the long tail that only shows up in daily use: keeping Claude's prompt cache warm (97 to 98% of input from the cache), compaction that doesn't resend the whole chat, Stop and resume without losing tool results, screenshots that push a long chat past the size limit, and GPT chats that keep working after Claude has answered in them. This one has been used daily for over two weeks, and [VERIFICATION.md](VERIFICATION.md) lists each problem found, its fix and the test that covers it.
+
+</details>
+
 ## Configuration
 
 Run the commands below from the downloaded folder (`~/Library/Application Support/Claude for ChatGPT Desktop/source`) or your clone. `python3 scripts/setup.py --help` lists every option. Setup rewrites the Claude profile's settings each time it runs, then `python3 scripts/install.py` applies them to the service.
