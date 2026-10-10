@@ -146,6 +146,29 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 | [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) (0 stars) | Claude Agent SDK as a model provider | Not documented | No images or compaction for Claude |
 | [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) (16.9k stars), [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (54k stars) | General model proxies | Only through raw OAuth tokens or an API key | With raw Claude OAuth tokens: Anthropic blocked third-party use on January 9, 2026 and has billed it as extra usage since April 4, 2026. Their `claude` CLI mode is stateless and has no tools |
 
+## FAQ
+
+<details>
+<summary>Can this get my Claude account banned?</summary>
+
+The bridge runs the official, unmodified Claude Code CLI with your own login, the same as running `claude -p` in a terminal. It never reads, copies or forwards your Claude credentials, and it doesn't offer a Claude login of its own. Anthropic says you can still use `claude -p` and third-party apps with your plan's usage limits ([update of October 7, 2026](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)). For heavy use, switch to an Anthropic API key (see "Claude login or API key" under [Configuration](#configuration)).
+
+</details>
+
+<details>
+<summary>Does it change anything for GPT?</summary>
+
+In picker mode, GPT requests pass through the bridge on your Mac and go on to OpenAI as the app sent them, with the app's own login, WebSocket connection and compaction. Picker mode changes one setting, `openai_base_url`, and `--uninstall` takes it back out. In a chat where Claude also answered, the bridge drops Claude's item ids before relaying, because OpenAI rejects ids it didn't create.
+
+</details>
+
+<details>
+<summary>Why not just use Claude Code or the Claude app?</summary>
+
+This gives Claude the ChatGPT app's tools and interface: the in-app browser, computer control, plugins and connectors, approvals and tool cards. You can also switch between Claude and GPT in the same chat.
+
+</details>
+
 <details>
 <summary>Why not just ask Claude or Codex to build one?</summary>
 
