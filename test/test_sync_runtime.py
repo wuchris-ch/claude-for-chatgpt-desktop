@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]/'scripts'))
-from sync_runtime import refresh_capabilities, enable_standalone_search, set_standalone_search
+from sync_runtime import refresh_capabilities, enable_standalone_search, set_standalone_search, model_catalog
 
 
 class PluginIsolationTests(unittest.TestCase):
@@ -143,13 +143,19 @@ class PluginIsolationTests(unittest.TestCase):
         self.assertEqual([x['effort'] for x in fable['supported_reasoning_levels']],['low','medium','high','xhigh','max'])
         self.assertEqual([x['effort'] for x in opus['supported_reasoning_levels']],['low','medium','high','xhigh','max'])
         self.assertEqual((fable['default_reasoning_level'],opus['default_reasoning_level'],sonnet['default_reasoning_level']),('high','medium','medium'))
-        self.assertEqual([x['effort'] for x in haiku['supported_reasoning_levels']],['medium'])
-        self.assertIn('no effort setting',haiku['supported_reasoning_levels'][0]['description'])
-        self.assertEqual([(m['context_window'],m['auto_compact_token_limit']) for m in models.values()],[(1000000,800000),(1000000,800000),(1000000,800000),(200000,160000)])
+        self.assertEqual([x['effort'] for x in haiku['supported_reasoning_levels']],['low','medium','high','xhigh','max'])
+        self.assertEqual(haiku['default_reasoning_level'],'medium')
+        self.assertEqual([(m['context_window'],m['auto_compact_token_limit']) for m in models.values()],[(1000000,800000)]*4)
         self.assertEqual([m['priority'] for m in models.values()],[1,2,3,4])
-        self.assertTrue(haiku['model_messages']['instructions_template'].startswith('You are Claude Haiku 4.5, running as the main assistant in ChatGPT Desktop.'))
+        self.assertTrue(haiku['model_messages']['instructions_template'].startswith('You are Claude Haiku 5.5, running as the main assistant in ChatGPT Desktop.'))
         self.assertTrue(haiku['model_messages']['instructions_template'].endswith('\nBe helpful.'))
-        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5'])
+        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5'])
+
+    def test_a_model_without_efforts_gets_one_fixed_level(self):
+        template={'slug':'gpt-fixture','tool_mode':'code_mode_only','priority':7,'input_modalities':['text','image'],'model_messages':{'instructions_template':'You are Codex, a coding agent.\nRules.'},'service_tiers':['flex']}
+        [entry]=model_catalog(template,{'default':'h','models':[{'slug':'h','claude_model':'claude-haiku-4-5-20251001','display_name':'Claude Haiku 4.5','efforts':[],'context_window':200000}]})
+        self.assertEqual(entry['supported_reasoning_levels'],[{'effort':'medium','description':'Fixed: this model has no effort setting'}])
+        self.assertEqual((entry['default_reasoning_level'],entry['context_window'],entry['auto_compact_token_limit']),('medium',200000,160000))
 
     def test_names_follow_the_versions_the_bridge_recorded(self):
         state=self.codex.parent/'sessions'
@@ -157,7 +163,7 @@ class PluginIsolationTests(unittest.TestCase):
         (state/'started-models.json').write_text(json.dumps({'claude-fable':'claude-fable-5-5','claude-opus':'claude-sonnet-5-5'}))
         refresh_capabilities(self.source,self.codex)
         models={m['slug']:m for m in json.loads((self.codex/'models.json').read_text())['models']}
-        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.5','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5'])
+        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.5','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5'])
         self.assertTrue(models['claude-fable']['model_messages']['instructions_template'].startswith('You are Claude Fable 5.5, running'))
         (state/'started-models.json').write_text('not json')
         refresh_capabilities(self.source,self.codex)

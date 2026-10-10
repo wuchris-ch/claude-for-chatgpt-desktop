@@ -3,7 +3,7 @@
 // random port with a temporary state folder. Each scenario sends a few short,
 // low-effort requests and uses your normal claude login (or ANTHROPIC_API_KEY
 // with CLAUDE_BRIDGE_AUTH=api_key).
-//   node e2e/live.mjs [models|tools|steer|image|switch|stop|compact ...]
+//   node e2e/live.mjs [models|tools|steer|image|switch|stop|compact|midturn ...]
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -91,6 +91,17 @@ const scenarios={
     const r=await done(await post('live-compact',{...first,input:[...first.input,...a.output,user('Summarize for a handoff.','u2')]},{headers:{'x-codex-turn-metadata':JSON.stringify({request_kind:'compaction'})}}));
     const summary=say(r.output);const fork=logs.some(x=>x.event==='compaction_fork');const imported=logs.find(x=>x.event==='compaction_import');
     check('compaction',/amber pine 742/.test(summary)&&/stg-14/.test(summary)&&fork&&r.output.some(x=>x.type==='compaction'),`${summary.length}-character checkpoint, ${fork?'forked from the live session':'imported ('+imported?.reason+')'}; ${cache(r)}`);
+  },
+  async midturn() {
+    // The desktop's automatic compaction fires inside a turn, after the host ran the tool call.
+    const first={...base('claude-sonnet',runJob),input:[user('The staging host is stg-14. Call run_job with name "nightly" exactly once, then report its build id in one line.','u1')]};
+    const a=await done(await post('live-midturn',first));const call=a.output.find(x=>x.type==='function_call');
+    if(!call)return check('mid-turn compaction',false,'no tool call: '+say(a.output));
+    const ran={type:'function_call_output',call_id:call.call_id,output:'nightly finished: 3 migrations applied, build id B-5521'};
+    const n=logs.length;
+    const r=await done(await post('live-midturn',{...first,input:[...first.input,...a.output,ran,user('Summarize for a handoff.','u2')]},{headers:{'x-codex-turn-metadata':JSON.stringify({request_kind:'compaction'})}}));
+    const summary=say(r.output);const fork=logs.slice(n).find(x=>x.event==='compaction_fork');
+    check('mid-turn compaction',/B-5521/.test(summary)&&fork?.stopped==='compacted_mid_turn'&&!logs.slice(n).some(x=>x.event==='compaction_import'),`${summary.length}-character checkpoint, build id ${/B-5521/.test(summary)?'kept':'missing'}, ${fork?`forked from the stopped turn (cold: ${fork.cold})`:'imported'}; ${cache(r)}`);
   },
 };
 

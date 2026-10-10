@@ -10,7 +10,18 @@ Unofficial and not affiliated with Anthropic or OpenAI. It runs your own Claude 
 
 ## Install
 
-You need macOS, the [ChatGPT desktop app](https://chatgpt.com/download), Node.js 24 or later, and [Claude Code](https://code.claude.com/docs/en/setup), signed in (run `claude` once and log in).
+You need macOS, the [ChatGPT desktop app](https://chatgpt.com/download), opened once and signed in, and [Claude Code](https://code.claude.com/docs/en/setup), signed in (run `claude` once and log in). Then run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wuchris-ch/claude-for-chatgpt-desktop/main/install.sh | bash
+```
+
+The installer checks for Node.js 24 or later and offers to install it with Homebrew. It installs a small background service, backs up your ChatGPT settings and adds one setting to them, then offers to reopen ChatGPT. Choose **Claude Fable 5.1**, **Claude Opus 5.5**, **Claude Sonnet 5.5** or **Claude Haiku 5.5** in the model picker of any chat. Run the same command again to update.
+
+To read the installer before running it, clone the repository and run `./install.sh` from there. To take Claude out of the picker and remove the service, add `--uninstall` (`curl ... | bash -s -- --uninstall`).
+
+<details>
+<summary>Step by step instead</summary>
 
 ```sh
 git clone https://github.com/wuchris-ch/claude-for-chatgpt-desktop.git
@@ -21,11 +32,15 @@ python3 scripts/install.py
 python3 scripts/picker.py install
 ```
 
-`install.py` installs a small background service. `picker.py install` backs up your ChatGPT settings and adds one setting to them. Quit and reopen ChatGPT, then choose **Claude Fable 5.1**, **Claude Opus 5.5**, **Claude Sonnet 5.5** or **Claude Haiku 4.5** in the model picker of any chat. To undo it, run `python3 scripts/picker.py uninstall` and reopen ChatGPT.
+`install.py` installs the background service. `picker.py install` backs up your ChatGPT settings and adds one setting to them. Quit and reopen ChatGPT. To undo it, run `python3 scripts/picker.py uninstall` and reopen ChatGPT.
+
+</details>
 
 ### Or a separate window
 
-To leave your usual ChatGPT window untouched, skip `picker.py` and run `python3 scripts/launch.py` (or double-click **Open ChatGPT with Claude.command**). It opens a second ChatGPT window with its own profile that uses only Claude. Sign into ChatGPT once in that window.
+To leave your usual ChatGPT window untouched, add `--window` (`curl ... | bash -s -- --window`), or from a clone run `python3 scripts/launch.py` after `install.py` (or double-click **Open ChatGPT with Claude.command**). It opens a second ChatGPT window with its own profile that uses only Claude. Sign into ChatGPT once in that window.
+
+The separate window can have its own instructions and skills, apart from your usual ChatGPT profile. Put an `AGENTS.md` file and a `skills` folder in its profile, `~/Library/Application Support/Claude for ChatGPT Desktop/codex/`; setup never replaces them. To use your usual ones instead, run `python3 scripts/setup.py --agents-md codex --share-skills`, which links `~/.codex/AGENTS.md` and `~/.codex/skills`.
 
 ## How it works
 
@@ -52,12 +67,13 @@ The separate window works the same way through its own model provider, without t
 - One warm Claude process per thread stays alive through a tool cycle and is resumed natively between turns, so the prompt cache carries the conversation. In daily use 97 to 98% of input tokens were read from the cache.
 - Messages you send while Claude is working reach the running turn, and Claude answers them in visible text before its next step.
 - Stop, then continue: the stopped session resumes with only what changed since the stop.
-- Compaction forks the live session so the summary reuses the cache, and the summary reaches the next context window.
-- Long browser and computer-control runs keep screenshot history bounded, and a stopped `clock.sleep` cannot hold a session forever.
+- Compaction forks the live session so the summary reuses the cache, including the automatic compaction that fires in the middle of a turn, and the summary reaches the next context window.
+- Long browser and computer-control runs keep screenshot history bounded, threads with many pasted screenshots stay under the request size limit, and a stopped `clock.sleep` cannot hold a session forever.
+- A question card the app would not draw (more than three questions, or a very long one) goes back to Claude with the reason, so Claude asks in a form you can see.
 - Images, edits and regeneration, helper agents, review mode and generated titles work as they do with GPT.
 - Switch models within a thread: Claude sees what GPT said and did since its last turn, and GPT can read Claude's compaction summaries.
 - In the separate window, the app's built-in web search is available as an opt-in.
-- 135 automated tests, live checks against real Claude Code, real OpenAI and the app's own runtime, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
+- 143 automated tests, live checks against real Claude Code, real OpenAI and the app's own runtime, and the measurements behind each design choice in [VERIFICATION.md](VERIFICATION.md).
 
 ## Compared with similar projects
 
@@ -74,7 +90,7 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 
 ## Limits
 
-- macOS only. Tested with ChatGPT 26.930.31730 (embedded Codex runtime 0.160.0), Claude Code 2.1.287 and Node.js 24.21. A later app or Claude Code release can change the protocols involved and need an update here.
+- macOS only. Tested with ChatGPT 26.1007.21159 (embedded Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.295 and Node.js 24.21. A later app or Claude Code release can change the protocols involved and need an update here.
 - Claude runs in local tasks. Cloud tasks, voice, image generation and other OpenAI-hosted features stay with GPT, and OpenAI-hosted tools in GPT's tool list (such as its built-in web search) are left out of Claude's.
 - In picker mode the app reaches OpenAI through the bridge. If the bridge service stops, GPT requests fail until launchd restarts it or you run `picker.py uninstall`. Picker mode needs a ChatGPT sign-in in the app, and it is not meant for ChatGPT workspaces with data-residency routing, which the app applies only when it talks to OpenAI directly.
 - A GPT compaction summary is encrypted for GPT. If a thread compacted by GPT switches to Claude, Claude gets the messages kept after the summary and a note that the summary is unavailable.
@@ -82,7 +98,6 @@ Checked October 4, 2026. Stars are GitHub stars on that date.
 - Some request options are refused with an error instead of being ignored: forced tool choice, output-token caps, non-JSON text formats, and `parallel_tool_calls=false` with tools.
 - Claude Code's safety classifiers can re-run a flagged request on a fallback model, such as Opus 4.8 for Opus 5.5. The bridge then stops the turn with an explanation instead of switching models silently.
 - In long browser runs, older screenshots leave Claude's context in batches (the app keeps them), so Claude takes a fresh screenshot when it needs one.
-- Haiku has no effort setting, so the picker offers one fixed level for it.
 
 ## Configuration
 
@@ -96,7 +111,7 @@ Run `python3 scripts/setup.py --help` for every option. Setup rewrites the Claud
 
 ### Models
 
-[claude-models.json](claude-models.json) lists the picker entries. Each `claude_model` is passed to `claude --model`. The aliases `fable`, `opus`, `sonnet` and `haiku` follow Claude Code to new releases; on October 4, 2026 they started `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-4-5-20251001`. The picker names each alias entry after the version Claude Code last started for it, so Claude Fable 5.1 becomes Claude Fable 5.5 after the first chat on the new release. To pin a version or add a model, copy the file, edit it, and pass it to setup:
+[claude-models.json](claude-models.json) lists the picker entries. Each `claude_model` is passed to `claude --model`. The aliases `fable`, `opus`, `sonnet` and `haiku` follow Claude Code to new releases; on October 9, 2026 they started `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`. The picker names each alias entry after the version Claude Code last started for it, so Claude Fable 5.1 becomes Claude Fable 5.5 after the first chat on the new release. To pin a version or add a model, copy the file, edit it, and pass it to setup:
 
 ```json
 {"slug": "claude-opus-5-5", "claude_model": "claude-opus-5-5", "display_name": "Claude Opus 5.5",
@@ -156,6 +171,7 @@ Everything lives in `~/Library/Application Support/Claude for ChatGPT Desktop/`:
 | `logs/` | Request, model, tool-name and lifecycle metadata, and service errors |
 | `launch.json`, `token`, `gateway-key` | Settings from setup, and the local keys between the app and the bridge |
 | `picker.json`, `backups/` | Picker mode's record of what it changed, and the backups it restores |
+| `source/` | The copy of this repository that `install.sh` downloads and updates |
 
 Claude Code keeps its own session transcripts as usual.
 
@@ -167,6 +183,12 @@ Claude Code keeps its own session transcripts as usual.
 - Apart from the one setting picker mode adds, your usual ChatGPT profile in `~/.codex` is only read, to copy its settings and plugins into the separate window's profile.
 
 ## Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wuchris-ch/claude-for-chatgpt-desktop/main/install.sh | bash -s -- --uninstall
+```
+
+Or from a clone:
 
 ```sh
 python3 scripts/picker.py uninstall          # take Claude out of the normal picker
@@ -189,8 +211,8 @@ Over the app's WebSocket, the bridge connects to OpenAI during the handshake so 
 ## Development
 
 ```sh
-npm test               # 135 tests with stand-ins for Claude Code and OpenAI
-node e2e/live.mjs      # nine short, low-effort checks with real Claude Code
+npm test               # 143 tests with stand-ins for Claude Code and OpenAI
+node e2e/live.mjs      # eleven short, low-effort checks with real Claude Code
 ```
 
 ## License

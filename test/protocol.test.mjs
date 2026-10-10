@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
-import {normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, asPrompt, steeringPrompt, STEERING_NOTE, newNotes, afterStop, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
+import {normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, newNotes, afterStop, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
 
 test('freeform tools preserve multiline JavaScript without JSON coercion',()=>{
  const [tool]=normalizeTools([{type:'custom',name:'exec',description:'Execute JS'}]);
@@ -135,4 +135,31 @@ test('after a Stop only what the stopped session never received is sent, with a 
  assert.match(text,/^<turn_stopped>Your previous turn was stopped before it finished\. A tool call shown as rejected or interrupted may still have run in the host\. The output the host recorded follows\.<\/turn_stopped><previous_tool_result call_id="c2">ran in host<\/previous_tool_result><developer_message><turn_aborted\/><\/developer_message>new$/);
  assert.match(resumeAfterStop([],{reason:'Bridge shutting down.'})[0].text,/bridge restart, not stopped by the user\. Continue the task from where it stopped\./);
  assert.match(resumeAfterStop([user('new','u3')],{reason:'tool_cycle_interrupted',sent:1})[0].text,/stopped before it finished\. A tool call shown as rejected had already reached the host.*running it again\.<\/turn_stopped>$/);
+});
+test('a compaction of a stopped turn says which interrupted tool calls the host ran',()=>{
+ const result={type:'custom_tool_call_output',call_id:'c1',output:'ran'};
+ assert.equal(stoppedTurnNote([result],'compacted_mid_turn')[0].text,'<turn_stopped>Your turn was paused here so the host could compact the conversation. A tool call shown as rejected or interrupted ran in the host if output for it follows.</turn_stopped>');
+ assert.match(stoppedTurnNote([result],'Desktop cancelled or disconnected.')[0].text,/^<turn_stopped>Your turn was stopped before it finished\. A tool call/);
+ assert.deepEqual(stoppedTurnNote([{type:'message',id:'u2',role:'user',content:[{type:'input_text',text:'next'}]}],'compacted_mid_turn'),[]);
+});
+test('an imported history explains the image copies Claude Code lists after it, and leaves plain attachments alone',()=>{
+ const image={type:'input_image',image_url:'data:image/png;base64,YQ=='};
+ const user=(content,id)=>({type:'message',id,role:'user',content});
+ const call={type:'custom_tool_call',call_id:'c1',name:'exec',input:'screenshot'};
+ const shot={type:'custom_tool_call_output',call_id:'c1',output:[{type:'input_text',text:'checkout page'},image]};
+ const answer={type:'message',role:'assistant',content:[{type:'output_text',text:'checked'}]};
+ const dev={type:'message',role:'developer',content:[{type:'input_text',text:'<codex_apps_client_time_context/>'}]};
+ // A side chat: the main chat's screenshot is history, the question has no image.
+ const side=[user([{type:'input_text',text:'check checkout'}],'u1'),call,shot,answer,dev,user([{type:'input_text',text:'any other runs?'}],'u2')];
+ const [note]=replayImageNote(side);
+ assert.match(note.text,/^<developer_message>.*\[Image: source: …\].*come from earlier in the conversation.*not an additional attachment.*<\/developer_message>$/);
+ // An image pasted with the question is named as its attachment.
+ const pasted=replayImageNote([...side.slice(0,-1),user([{type:'input_text',text:'and this?'},image,image],'u2')])[0].text;
+ assert.match(pasted,/The 2 images in the last user message were attached to it\. The rest come from earlier/);
+ assert.match(replayImageNote([...side.slice(0,-1),user([image],'u2')])[0].text,/The image in the last user message was attached to it\./);
+ // Nothing to explain without earlier images.
+ assert.deepEqual(replayImageNote([user([{type:'input_text',text:'q'}],'u1'),answer,user([{type:'input_text',text:'look'},image],'u2')]),[]);
+ assert.deepEqual(replayImageNote([user([{type:'input_text',text:'q'}],'u1'),answer,user([{type:'input_text',text:'next'}],'u2')]),[]);
+ // A transcript that ends on a screenshot result counts it as earlier context.
+ assert.match(replayImageNote([user([{type:'input_text',text:'q'}],'u1'),call,shot])[0].text,/come from earlier/);
 });

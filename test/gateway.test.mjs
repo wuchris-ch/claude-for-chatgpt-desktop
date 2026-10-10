@@ -104,7 +104,7 @@ test('the model list gains the Claude entries and keeps its cache validation',as
  const opus=list[3];
  assert.deepEqual([opus.display_name,opus.priority,opus.context_window,opus.auto_compact_token_limit,opus.tool_mode],['Claude Opus 5.5',5,1000000,800000,'code_mode_only']);
  assert.match(opus.model_messages.instructions_template,/^You are Claude Opus 5\.5, running as the main assistant in ChatGPT Desktop\..*\nRules\.$/s);
- assert.deepEqual(list.slice(2).map(m=>m.display_name),['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ assert.deepEqual(list.slice(2).map(m=>m.display_name),['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5']);
  assert.equal(openai.seen.http[0].headers['accept-encoding'],'identity');
  const again=await fetch(base+'/models?client_version=9',{headers:{...app,'If-None-Match':etag}});
  assert.equal(again.status,304);assert.equal(again.headers.get('etag'),etag);

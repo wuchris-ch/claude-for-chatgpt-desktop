@@ -8,7 +8,7 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 const arg=name=>process.argv[process.argv.indexOf(name)+1];
 // Like Claude Code, an alias resolves through the ANTHROPIC_DEFAULT_*_MODEL
 // pins or its built-in table. FAKE_CLAUDE_MODEL simulates a substituted model.
-const ALIASES={fable:'claude-fable-5-1',opus:'claude-opus-5-5',sonnet:'claude-sonnet-5-5',haiku:'claude-haiku-4-5-20251001'};
+const ALIASES={fable:'claude-fable-5-1',opus:'claude-opus-5-5',sonnet:'claude-sonnet-5-5',haiku:'claude-haiku-5-5'};
 const PINS={fable:process.env.ANTHROPIC_DEFAULT_FABLE_MODEL,opus:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,haiku:process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL};
 const requested=arg('--model');
 const model=process.env.FAKE_CLAUDE_MODEL||PINS[requested]||ALIASES[requested]||requested;
@@ -43,8 +43,6 @@ input.on('line',async line=>{
   send({type:'result',is_error:false,modelUsage:{[model]:{contextWindow:1000000}},permission_denials:[],result:JSON.stringify(value),structured_output:value});return;
  }
  if(request.includes('echo-input')){text('ECHO '+request);return;}
- // A resumed stopped turn reports how it was started and what it was sent.
- if(request.includes('turn_stopped')){text('RESUMED '+JSON.stringify({resume:process.argv.includes('--resume')?arg('--resume'):null,request}));return;}
  // Stands in for a long think: no stream events at all until the answer.
  if(request.includes('silent-think')){setTimeout(()=>text('AWAKE'),Number(/silent-think-(\d+)/.exec(request)?.[1]??1000));return;}
  if(request.includes('env-probe')){text('ENV '+process.env.MCP_TOOL_TIMEOUT+' '+process.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH+' idle:'+process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT+' output:'+process.env.MAX_MCP_OUTPUT_TOKENS+' size:'+listed.tools[0]?._meta?.['anthropic/maxResultSizeChars']+' token:'+(process.env.CLAUDE_CODE_OAUTH_TOKEN??'none'));return;}
@@ -83,9 +81,19 @@ input.on('line',async line=>{
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   report({toolResult:await client.callTool({name:'exec',arguments:args})});return;
  }
+ // A resumed stopped turn reports how it was started and what it was sent.
+ if(request.includes('turn_stopped')){text('RESUMED '+JSON.stringify({resume:process.argv.includes('--resume')?arg('--resume'):null,request}));return;}
  if(request.includes('<history_message')) {
   const transcript=msg.message.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
   text('REPLAY '+JSON.stringify({input:transcript.length<5000?transcript:transcript.slice(0,500)+'\n'+transcript.slice(-1500),images:msg.message.content.filter(c=>c.type==='image').length,bytes:request.length,updatedPolicy:fs.readFileSync(arg('--system-prompt-file'),'utf8').includes('UPDATED-POLICY')}));return;
+ }
+ if(request.includes('question-card')) {
+  // Four questions, one 700-character question, or a card the desktop can show.
+  const q=title=>({title,options:['Yes','No']});
+  const args={questions:request.includes('question-card-four')?['A?','B?','C?','D?'].map(q):request.includes('question-card-long')?[q('L'.repeat(700)+'?')]:[q('A?'),q('B?')]};start();
+  send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_card',name:'mcp__chatgpt__request_user_input_async',input:args}]}});
+  event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
+  text('CARD '+JSON.stringify(await client.callTool({name:'request_user_input_async',arguments:args})));return;
  }
  if(request.includes('sleep-tool')) {
   // A host sleep the desktop never answers, as after a Stop in the desktop.

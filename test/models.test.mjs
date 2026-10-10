@@ -14,11 +14,11 @@ test('the shipped catalog offers Fable, Opus, Sonnet and Haiku through Claude Co
   ['claude-fable','fable','Claude Fable 5.1','high',1000000],
   ['claude-opus','opus','Claude Opus 5.5','medium',1000000],
   ['claude-sonnet','sonnet','Claude Sonnet 5.5','medium',1000000],
-  ['claude-haiku','haiku','Claude Haiku 4.5',null,200000]]);
+  ['claude-haiku','haiku','Claude Haiku 5.5','medium',1000000]]);
  assert.equal(models.get('claude-fable').family,'fable');
  assert.deepEqual(models.get('claude-fable').efforts,['low','medium','high','xhigh','max']);
  assert.deepEqual(models.get('claude-sonnet').efforts,['low','medium','high','xhigh','max']);
- assert.deepEqual(models.get('claude-haiku').efforts,[]);
+ assert.deepEqual(models.get('claude-haiku').efforts,['low','medium','high','xhigh','max']);
  assert.equal(models.get('claude-opus-5-5'),undefined);
 });
 test('CLAUDE_BRIDGE_MODELS points the bridge at a custom catalog',t=>{
@@ -57,7 +57,7 @@ test('an alias entry is named after the version Claude Code started; a pinned en
  const pinned=parseModels({models:[entry({claude_model:'claude-opus-5-5',display_name:'My Opus'})]}).get('m');
  assert.equal(labelFor(pinned,'claude-opus-5-5'),'My Opus');
  const models=loadModels();
- assert.deepEqual(labeled(models,new Map([['claude-opus','claude-opus-5-6']])).list.map(m=>m.display_name),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ assert.deepEqual(labeled(models,new Map([['claude-opus','claude-opus-5-6']])).list.map(m=>m.display_name),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
  assert.equal(models.get('claude-opus').display_name,'Claude Opus 5.5');
 });
 test('effort defaults per model, and models without effort take none',()=>{
@@ -65,7 +65,9 @@ test('effort defaults per model, and models without effort take none',()=>{
  assert.equal(effortFor(models.get('claude-fable')),'high');
  assert.equal(effortFor(models.get('claude-opus')),'medium');
  assert.equal(effortFor(models.get('claude-sonnet'),'xhigh'),'xhigh');
- assert.equal(effortFor(models.get('claude-haiku'),'high'),null);
+ assert.equal(effortFor(models.get('claude-haiku')),'medium');
+ const fixed=parseModels({models:[entry({slug:'haiku-4-5',claude_model:'claude-haiku-4-5-20251001',display_name:'Claude Haiku 4.5',efforts:[]})]}).get('haiku-4-5');
+ assert.equal(effortFor(fixed,'high'),null);assert.equal(effortFor(fixed),null);
  assert.throws(()=>effortFor(models.get('claude-opus'),'ultra'),e=>e.statusCode===400&&/Claude Opus 5\.5 does not support ultra effort\. Choose one of: low, medium, high, xhigh, max\./.test(e.message));
 });
 

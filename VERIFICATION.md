@@ -2,7 +2,58 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. The newest checks come first.
+
+## Release 0.3.3, checked October 9, 2026
+
+Version 0.3.3 lists Claude Haiku 5.5 with its effort levels, adds `install.sh`, and brings four fixes made in the separate-window bridge after 0.3.2.
+
+| Picker entry | Alias | Model Claude Code started | Context window | Effort levels |
+|---|---|---|---|---|
+| Claude Fable 5.1 | `fable` | `claude-fable-5-1` | 1,000,000 | low to max, default high |
+| Claude Opus 5.5 | `opus` | `claude-opus-5-5` | 1,000,000 | low to max, default medium |
+| Claude Sonnet 5.5 | `sonnet` | `claude-sonnet-5-5` | 1,000,000 | low to max, default medium |
+| Claude Haiku 5.5 | `haiku` | `claude-haiku-5-5` | 1,000,000 | low to max, default medium |
+
+Claude Code 2.1.295 starts `claude-haiku-5-5` for the `haiku` alias and reports a 1,000,000-token window. Haiku 5.5 accepts all five effort levels and defaults to medium, according to the [effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort). Claude Code also accepts `--effort` with `claude-haiku-4-5-20251001` and answers normally, so an account whose alias still starts Haiku 4.5 is not broken by the flag. An entry listed without efforts, such as a pinned Haiku 4.5, still gets one fixed level and no flag.
+
+### One-line installer
+
+`install.sh` checks for macOS, git and python3, the ChatGPT app and the model list it downloads on first launch, Node.js 24 or later (offering Homebrew), and Claude Code and its sign-in. It then downloads or updates a copy of the repository in the runtime folder, runs `npm ci`, `install.py` and `picker.py install`, and offers to reopen ChatGPT when exactly one ChatGPT process is running. `--window` opens the separate window instead, and `--uninstall` turns picker mode off and removes the service.
+
+It was run from a working copy against a temporary runtime folder and a temporary ChatGPT profile, with its own port and service label. Without the app's model list, setup had stopped with a Python traceback; the installer now stops first with "Open the ChatGPT app once and sign in, then run this again." With the list it installed the service and turned picker mode on in the temporary profile. With two ChatGPT processes running, it told the user to reopen ChatGPT rather than quitting either. `--uninstall` restored the temporary `config.toml` byte for byte and removed the service. shellcheck reports no issues.
+
+### Question cards the app does not draw
+
+On October 4, 2026 Opus sent `request_user_input_async` a card with four questions, the first about 1,100 characters long. The app answered `{"accepted":true}` and stored the questions, but drew no card, so the user saw nothing while Opus said the questions were waiting. Fourteen earlier cards, with one to three questions of at most 540 characters, were drawn and answered. GPT never sent more than three questions in 154 cards, and the app's other question cards allow three. The bridge now answers an async card with more than three questions, or a question over 600 characters, with an error that states the limit, and does not forward it. It logs `question_card_refused`. Live with real Opus, asked to put four questions in one card, Opus was refused once and sent a three-question card, which reached the app.
+
+### Pasted screenshots counted toward the request limit
+
+On October 8 a thread stopped with `413 Payload Too Large: The model input still exceeds 24 MiB after bounding older tool screenshots`. Since its last compaction it held 20 images: 12 slide stills and one render returned by tools (15.25 MiB, under the 16 MiB tool-image mark, so none were bounded) and 7 pasted screenshots (8.55 MiB, including two Retina captures of 3.5 MiB each), which the bounding never counted. With 2.5 MiB of compacted history and text the request reached 24.16 MiB, and every retry failed the same way. The bridge now also bounds the whole request: above 20 MiB it replaces the oldest earlier images, tool images and attachments alike, until about 12 MiB remain, keeping attachments sent since Claude last answered and the newest tool image. Replaying that thread's history gives 8.25 MiB with 11 of the 12 newest slide stills kept. Two tests cover the mix of attachments and tool images; both fail on 0.3.2.
+
+### Image copies after a history import
+
+A new context, such as a new side chat, imports the app's transcript as one prompt, with each image in its original place. Claude Code saves every image in a prompt and appends a note listing the copies as `[Image: source: /private/tmp/…/images/1.jpg]`, so the last thing Claude read after the user's question was an image path. In 14 days of transcripts Opus opened such a copy 19 times, all in the first turn after a history import (19 of 70 imports that carried images), and never after one of the 95 prompts with images the user had pasted. On October 9 a side chat answered "any other runs we should be doing" by first opening a screenshot from the main chat. Claude Code 2.1.295 stores prompt images unless transcript saving is off, which the bridge needs for resume, so the bridge now ends an imported transcript that holds earlier images with a note saying the listed lines are copies of images already shown, not new attachments, and naming any images attached to the last user message. Live with real Opus 5.5 on that side chat's first prompt, stopped at the first tool call: without the note, 2 of 2 runs opened the copy first; with it, 0 of 3 did.
+
+### Mid-turn compaction from the cache
+
+The app's automatic compaction usually fires in the middle of a turn: it runs the turn's tool calls, finds the context over its limit and compacts before sampling again. The native session was still waiting on those calls, so the bridge imported the transcript into a new session, writing the whole conversation to the cache at twice the input price, about 40 times the cost of a fork that reads it from the cache. The bridge now stops the waiting session as Stop does, then forks it from its cached prompt; the app continues in a new context, so the old session was stopped after the compaction anyway. Claude Code marks the stopped calls as rejected or interrupted, so the fork is told that a call ran in the host when its output follows. The cache lifetime check uses the session's last response. The integration test that expected an import now expects the fork and fails on 0.3.2.
+
+### Automated tests in 0.3.3
+
+143 tests pass: 115 Node tests and 28 Python tests. New or changed in 0.3.3:
+
+- The shipped catalog lists Claude Haiku 5.5 with five effort levels, a medium default and a 1,000,000-token window, and an entry without efforts still gets one fixed level in both the bridge and the Python setup.
+- Question cards over the app's limits are refused with the reason, and a valid card reaches the app.
+- Pasted attachments count toward the request window, the oldest earlier images give way first, and the current request's attachments and the newest tool image stay.
+- A new side chat imports the main chat's images with the note, and a transcript without earlier images gets none.
+- A compaction during a tool cycle stops the waiting turn and forks it warm, with the note on which interrupted calls ran.
+
+### Live checks in 0.3.3
+
+`node e2e/live.mjs` with Claude Code 2.1.295 passes all eleven checks: each of the four models answers (Haiku 5.5 with an effort flag), a tool call, a message sent mid-turn, an image, a switch from Opus to Sonnet that resumes the native session, Stop then continue, a compaction forked from the live session, and the new mid-turn check, where the checkpoint kept the job's build id and was forked from the stopped turn with a warm cache.
+
+With ChatGPT 26.1007.21159, the app's own `codex exec` (Codex runtime 0.162.0-alpha.17.2) used the real ChatGPT login with `openai_base_url` pointed at a picker-mode bridge that `install.sh` had installed in the temporary profile. GPT (`gpt-6-luna` at low effort) answered over the app's Responses WebSocket through the relay, and Claude Haiku 5.5 answered through the same endpoint. A control run with the base URL on a closed port failed to connect, so both requests went through the bridge. The app's window and picker were not opened for this check.
 
 ## Release 0.3.1, checked October 4, 2026
 

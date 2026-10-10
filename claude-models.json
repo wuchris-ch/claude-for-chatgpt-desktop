@@ -50,11 +50,17 @@
     {
       "slug": "claude-haiku",
       "claude_model": "haiku",
-      "display_name": "Claude Haiku 4.5",
+      "display_name": "Claude Haiku 5.5",
       "description": "Latest Claude Haiku through Claude Code. Fastest, for simple tasks.",
-      "efforts": [],
-      "default_effort": null,
-      "context_window": 200000
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "context_window": 1000000
     }
   ]
 }

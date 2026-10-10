@@ -185,6 +185,13 @@ export function afterStop(input, stamp, seen = [], delivered = []) {
   return input.slice(historyEnd(input, stamp)).filter(x =>
     isIncoming(x) ? !seen.includes(inputKey(x)) : isResult(x) ? !delivered.includes(x.call_id) : isDeveloper(x));
 }
+// A compaction that forks a stopped turn sees the same marks. Without a note,
+// the checkpoint could record calls the host ran as never run.
+export function stoppedTurnNote(items, reason) {
+  if (!items.some(isResult)) return [];
+  const why = reason === 'compacted_mid_turn' ? 'Your turn was paused here so the host could compact the conversation.' : 'Your turn was stopped before it finished.';
+  return [{type: 'text', text: `<turn_stopped>${why} A tool call shown as rejected or interrupted ran in the host if output for it follows.</turn_stopped>`}];
+}
 // Claude Code marks a stopped turn's unanswered tool calls as rejected by the
 // user, which is not always what happened in the host.
 export function resumeAfterStop(items, {reason, sent = 0}) {
@@ -266,6 +273,25 @@ export function userInput(items, {replay = false, prefix = true} = {}) {
     }
   }
   return out.length ? out : [{type: 'text', text: 'Continue from the current conversation context.'}];
+}
+
+// Claude Code saves each image in a prompt and lists the copies after it as
+// [Image: source: …] lines. After a history import, such as a new side chat,
+// those lines read as images the user had just attached: Opus opened an old
+// screenshot again in 19 of 70 imports that carried images, and took the
+// question to be about it. Pasted attachments never caused this.
+const isImageContent = c => c.type === 'input_image' || c.type === 'image';
+const imagesIn = items => items.reduce((n, x) => n + (x.type === 'message' && Array.isArray(x.content) ? x.content.filter(isImageContent).length
+  : isResult(x) && Array.isArray(x.output) ? x.output.filter(isImageContent).length : 0), 0);
+export function replayImageNote(items) {
+  const last = items.findLastIndex(x => !(x.type === 'message' && x.role === 'user') && !isDeveloper(x));
+  const attached = imagesIn(items.slice(last + 1).filter(x => x.type === 'message' && x.role === 'user'));
+  const earlier = imagesIn(items) - attached;
+  if (!earlier) return [];
+  const origin = attached
+    ? `The ${attached === 1 ? 'image' : `${attached} images`} in the last user message ${attached === 1 ? 'was' : 'were'} attached to it. The rest come from earlier in the conversation.`
+    : 'The images come from earlier in the conversation.';
+  return [{type: 'text', text: `<developer_message>The conversation above was imported from the desktop transcript. Claude Code lists a saved copy of each image in it after this message, as [Image: source: …] lines. ${origin} Each line is a file copy of an image already visible above, not an additional attachment, so there is no need to open it.</developer_message>`}];
 }
 
 // Claude Code reads a user message whose text starts with "/" as a command,

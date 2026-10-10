@@ -70,8 +70,8 @@ export function labeled(models,started=new Map()) {
   return {...models,list:models.list.map(m=>({...m,display_name:labelFor(m,started.get(m.slug))}))};
 }
 
-// Haiku-class models have no effort setting: the desktop's fixed level is
-// accepted and nothing is passed to Claude Code.
+// A model listed without efforts, such as Haiku 4.5, has no effort setting:
+// the desktop's fixed level is accepted and nothing is passed to Claude Code.
 export function effortFor(model,requested) {
   if(!model.efforts.length)return null;
   const effort=requested??model.default_effort;

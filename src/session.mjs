@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, normalizeTools, mcpResult, systemPrompt, userInput, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, resumeAfterStop, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
+import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 
@@ -31,6 +31,17 @@ export function saveToolSet(stateDir,tools) {
 // How long a mid-turn message may wait for Claude Code to confirm it queued,
 // and the longest thought shown when Claude answered one only in thinking.
 const STEER_CONFIRM_MS=5000,ACK_THINKING_MAX=600;
+// The desktop accepted an async question card with four questions, one of them
+// 1,100 characters long, and drew nothing, so the user never saw it. Its other
+// question cards allow three; GPT's questions stay under about 460 characters.
+const CARD_MAX_QUESTIONS=3,CARD_MAX_TITLE=600;
+function cardProblem(tool,args) {
+  if(tool.originalName!=='request_user_input_async')return null;
+  const questions=Array.isArray(args?.questions)?args.questions:[];
+  if(questions.length>CARD_MAX_QUESTIONS)return `the desktop shows at most ${CARD_MAX_QUESTIONS} questions in a card and silently drops a larger one. Ask at most ${CARD_MAX_QUESTIONS} now and the rest in a later card.`;
+  if(questions.some(q=>String(q?.title??'').length>CARD_MAX_TITLE))return `keep each question under ${CARD_MAX_TITLE} characters so the desktop shows the card. Put long lists in a visible message or a file and refer to them.`;
+  return null;
+}
 // Inherited variables are cleared so the user's shell or service environment
 // cannot change the account, endpoint or model. CLAUDE_CONFIG_DIR stays: it
 // only says where Claude Code keeps its own login and settings.
@@ -146,13 +157,19 @@ export class Session {
   // A compaction at a turn boundary forks the thread's native session with
   // the same system prompt, tools and effort, so the prompt cache covers the
   // conversation. Importing it as text into a fresh session rewrote the whole
-  // cache, up to 459k tokens per compaction. Anything that does not line up,
-  // including a tool cycle in progress, keeps the import.
+  // cache, up to 459k tokens per compaction. Anything that does not line up
+  // keeps the import.
   async compactionFork(input,turnKey) {
     const id=digest(turnKey);
     const live=[...this.bridge.sessions.values()].find(x=>x.id===id);
     // A turn that just completed may still be closing its process.
     if(live?.exiting&&!live.stream)await live.exiting;
+    // The desktop compacts in the middle of a turn after running its tool calls,
+    // then continues in a new context and never answers the waiting session.
+    // Stopping that session, as Stop does, lets the fork read the conversation
+    // from the cache instead of importing it at the auto-compact limit.
+    let used=null;
+    if(live?.child&&!live.stream&&!live.accepting){used=live.lastUsed;live.cancel('compacted_mid_turn');await live.exiting;}
     if(live&&(live.child||live.accepting||live.stream))return {reason:'turn_in_progress'};
     const read=file=>{try{return fs.readFileSync(path.join(this.bridge.stateDir,file),'utf8');}catch{return null;}};
     const record=JSON.parse(read(`${id}.json`)??'null'),prompt=read(`${id}.system.txt`);
@@ -164,9 +181,10 @@ export class Session {
     const tools=read(path.join('tool-sets',`${record.toolSet}.json`));
     if(!tools)return {reason:'tool_list_missing'};
     const extra=record.inflight?afterStop(input,record.history,record.stop.seen,record.delivered):input.slice(historyEnd(input,record.history));
-    // The record was last saved when the session's turn ended or was stopped.
-    const cold=Date.now()-fs.statSync(path.join(this.bridge.stateDir,`${id}.json`)).mtimeMs>CACHE_TTL_MS;
-    return {from:id.slice(0,12),claudeId:record.claudeId,model,effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold};
+    // The record was last saved when the session's turn ended or was stopped. A
+    // turn stopped just now last used the cache at its latest response.
+    const cold=Date.now()-(used??fs.statSync(path.join(this.bridge.stateDir,`${id}.json`)).mtimeMs)>CACHE_TTL_MS;
+    return {from:id.slice(0,12),claudeId:record.claudeId,model,effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold,stopped:record.inflight?record.stop.reason:null};
   }
   // After a compaction in the middle of a turn, the desktop continues in a new
   // context window and never answers the old session's pending tool call, so
@@ -219,9 +237,9 @@ export class Session {
       this.cancel('tool_cycle_interrupted');await this.exiting;await this.resumeOrRecover(body);
     }
     const originalInput=body.input;
-    const bounded=boundToolImages(originalInput,this.record.imageCutoff??0);
-    if(bounded.cutoff!==(this.record.imageCutoff??0)&&(this.child||this.record.started||this.resumeItems))await this.reset('image_history_bounded');
-    this.record.imageCutoff=bounded.cutoff;
+    const bounded=boundToolImages(originalInput,this.record.imageCutoff??0,this.record.userImageCutoff??0,Buffer.byteLength(JSON.stringify({...body,input:[]})));
+    if((bounded.cutoff!==(this.record.imageCutoff??0)||bounded.userCutoff!==(this.record.userImageCutoff??0))&&(this.child||this.record.started||this.resumeItems))await this.reset('image_history_bounded');
+    this.record.imageCutoff=bounded.cutoff;this.record.userImageCutoff=bounded.userCutoff;
     body={...body,input:bounded.input};
     assertModelInputFits(body);
     // A new inference request with no new user message can be regeneration.
@@ -263,14 +281,14 @@ export class Session {
     this.turnKey=body.__bridge_turn_key;
     let fork=body.__bridge_compaction&&!this.record.started&&body.__bridge_turn_key?await this.compactionFork(originalInput,body.__bridge_turn_key):null;
     if(fork?.reason){this.log('compaction_import',{reason:fork.reason});fork=null;}
-    if(fork){this.tools=fork.tools;this.log('compaction_fork',{from:fork.from,extra_items:fork.extra.length,cold:fork.cold});}
+    if(fork){this.tools=fork.tools;this.log('compaction_fork',{from:fork.from,extra_items:fork.extra.length,cold:fork.cold,stopped:fork.stopped});}
     await this.setupMcp();
     const users=body.input.filter(isIncoming);
     const key=inputKey;
     const fresh=users.filter(x=>!this.record.seen.includes(key(x)));
     let input;
     if(fork) {
-      input=[...(fork.extra.length?userInput(fork.extra,{replay:true,prefix:false}):[]),{type:'text',text:COMPACTION_REQUEST}];
+      input=[...(fork.stopped?stoppedTurnNote(fork.extra,fork.stopped):[]),...(fork.extra.length?userInput(fork.extra,{replay:true,prefix:false}):[]),{type:'text',text:COMPACTION_REQUEST}];
     } else if(this.resumeItems) {
       input=resumeAfterStop(this.resumeItems,this.record.stop);
     } else if(this.record.started) {
@@ -280,7 +298,7 @@ export class Session {
       input=other?[{type:'text',text:OTHER_MODEL_NOTE},...userInput(other,{replay:true,prefix:false})]:userInput(this.withNotes(body.input,fresh,this.record.history),{prefix:false});
     } else {
       const replay=body.input.some(x=>x.role==='assistant'||isResult(x)||['function_call','custom_tool_call'].includes(x.type));
-      input=userInput(body.input,{replay});
+      input=[...userInput(body.input,{replay}),...(replay?replayImageNote(body.input):[])];
       if(replay)this.log('history_import',{reason:'new_or_compacted_context'});
     }
     this.pendingSeen=[...new Set([...this.record.seen,...users.map(key)])];
@@ -382,10 +400,14 @@ export class Session {
         if(!tool){this.log('unknown_tool',{name:c.name});continue;}
         // A compaction fork lists the session's tools only so the cache matches. Nothing runs.
         const compacting=this.stream instanceof CompactionStream;
-        this.nativeCalls.push({id:c.id,args:c.input,tool,emitted:compacting});
+        const problem=!compacting&&cardProblem(tool,c.input);
+        this.nativeCalls.push({id:c.id,args:c.input,tool,emitted:compacting||!!problem});
         if(compacting) {
           this.results.set(c.id,{isError:true,content:[{type:'text',text:'Not run: the host is compacting this conversation. Reply only with the checkpoint.'}]});
           this.log('compaction_tool_refused',{name:tool.originalName});
+        } else if(problem) {
+          this.results.set(c.id,{isError:true,content:[{type:'text',text:'Not shown to the user: '+problem}]});
+          this.log('question_card_refused',{questions:c.input?.questions?.length,longest:Math.max(0,...(c.input?.questions??[]).map(q=>String(q?.title??'').length))});
         }
         for(const wake of this.callWaiters)wake();
       }

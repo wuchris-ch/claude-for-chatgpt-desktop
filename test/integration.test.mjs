@@ -282,6 +282,22 @@ test('a clock.sleep answered in time is not stopped',async t=>{
  await new Promise(r=>setTimeout(r,400));
  assert.equal(logs.some(x=>x.event==='host_sleep_abandoned'),false);
 });
+test('a question card the desktop would not draw is refused with the reason, and a valid card reaches the desktop',async t=>{
+ const {post,logs}=await setup(t);
+ const thread=id=>({headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':id}});
+ const cardTools=[...tools,{type:'function',name:'request_user_input_async',description:'Asks.',parameters:{type:'object',properties:{questions:{type:'array'}},required:['questions']}}];
+ for(const [mode,reason] of [['question-card-four',/at most 3 questions/],['question-card-long',/under 600 characters/]]) {
+  const out=output(await(await post({...request(mode),tools:cardTools},thread(mode))).text());
+  assert.equal(out.some(x=>x.type==='function_call'),false);
+  assert.match(JSON.stringify(out),/CARD .*Not shown to the user/);assert.match(JSON.stringify(out),reason);
+ }
+ assert.deepEqual(logs.filter(x=>x.event==='question_card_refused').map(x=>[x.questions,x.longest]),[[4,2],[1,701]]);
+ const first={...request('question-card-ok'),tools:cardTools};
+ const out=output(await(await post(first,thread('ok'))).text());
+ assert.equal(out[0].type,'function_call');assert.equal(out[0].name,'request_user_input_async');
+ const final=JSON.stringify(output(await(await post({...first,input:[...first.input,...out,{type:'function_call_output',call_id:out[0].call_id,output:'{"accepted":true}'}]},thread('ok'))).text()));
+ assert.match(final,/CARD .*accepted/);
+});
 test('an edited transcript during a tool cycle still rebuilds even when a message is appended',async t=>{
  const {post,logs}=await setup(t);const first=request('invoke-tool');
  output(await(await post(first)).text());
@@ -354,17 +370,19 @@ test('a tool call inside a compaction fork is refused and the checkpoint still r
  assert.match(text,/Not run: the host is compacting/);
  assert.ok(logs.some(x=>x.event==='compaction_tool_refused'));assert.equal(logs.some(x=>x.event==='error'),false);
 });
-test('a compaction during a tool cycle imports the transcript instead of forking',async t=>{
- const {post,logs}=await setup(t);const first=request('invoke-tool');
+test('a compaction during a tool cycle stops the waiting turn and forks it from the cache',async t=>{
+ const {post,logs,dir}=await setup(t);const first={...request('invoke-tool'),reasoning:{effort:'high'}};
  const call=output(await(await post(first)).text())[0];
- const text=await checkpoint(await compact(post,{...first,input:[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'done'}]}));
- assert.match(text,/^REPLAY/);
- assert.equal(logs.some(x=>x.event==='compaction_fork'),false);assert.ok(logs.some(x=>x.event==='history_import'));
- assert.ok(logs.some(x=>x.event==='compaction_import'&&x.reason==='turn_in_progress'));
- // The desktop continues in a new window, so the waiting turn process is stopped.
- await waitUntil(()=>logs.some(x=>x.event==='cancel'&&x.reason==='compacted_mid_turn'));
+ const text=await checkpoint(await compact(post,{...first,input:[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'host-ran-this'}]}));
+ const report=JSON.parse(text.replace(/^FORK /,''));
+ // The desktop continues in a new window, so the waiting turn is stopped first.
  const turn=logs.find(x=>x.event==='cancel'&&x.reason==='compacted_mid_turn').session;
- await waitUntil(()=>logs.some(x=>x.event==='claude_exit'&&x.session===turn));
+ assert.ok(logs.findIndex(x=>x.event==='claude_exit'&&x.session===turn)<logs.findIndex(x=>x.event==='compaction_fork'));
+ assert.equal(report.fork,true);assert.equal(report.effort,'high');assert.equal(report.caching,'on');assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.match(report.request,/turn_stopped>Your turn was paused here so the host could compact the conversation\. A tool call shown as rejected or interrupted ran in the host if output for it follows\..*host-ran-this.*compaction_request/);
+ assert.doesNotMatch(report.request,/invoke-tool/);
+ assert.ok(logs.some(x=>x.event==='compaction_fork'&&x.stopped==='compacted_mid_turn'&&x.cold===false&&x.extra_items===1));
+ assert.equal(logs.some(x=>['history_import','compaction_import','error'].includes(x.event)),false);
 });
 test('stored tool lists older than a day are pruned',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'tool-sets-'));
@@ -444,7 +462,7 @@ test('unknown auth modes are refused at startup',async()=>{
  await assert.rejects(startBridge({stateDir:dir,token:'x',port:0,claude:fixture,auth:{mode:'oauth_token'}}),/Unknown auth mode oauth_token/);
  fs.rmSync(dir,{recursive:true,force:true});
 });
-test('each catalog model starts Claude Code with its own model, effort and name; Haiku gets no effort flag',async t=>{
+test('each catalog model starts Claude Code with its own model, effort and name; a model without efforts gets no effort flag',async t=>{
  const {post,logs}=await setup(t);
  const fable=await probe(post,'model-probe',{model:'claude-fable'},'t-fable');
  assert.deepEqual([fable.requested,fable.model,fable.effort,fable.identity],['fable','claude-fable-5-1','high','Claude Fable 5.1']);
@@ -453,9 +471,12 @@ test('each catalog model starts Claude Code with its own model, effort and name;
  const sonnet=await probe(post,'model-probe',{model:'claude-sonnet',reasoning:{effort:'high'}},'t-sonnet');
  assert.deepEqual([sonnet.requested,sonnet.model,sonnet.effort,sonnet.identity],['sonnet','claude-sonnet-5-5','high','Claude Sonnet 5.5']);
  const haiku=await probe(post,'model-probe',{model:'claude-haiku',reasoning:{effort:'medium'}},'t-haiku');
- assert.deepEqual([haiku.requested,haiku.model,haiku.effort,haiku.identity],['haiku','claude-haiku-4-5-20251001',null,'Claude Haiku 4.5']);
- assert.deepEqual(logs.filter(x=>x.event==='claude_start').map(x=>[x.model,x.claude_model,x.effort]),[['claude-fable','fable','high'],['claude-opus','opus','medium'],['claude-sonnet','sonnet','high'],['claude-haiku','haiku',null]]);
- assert.deepEqual(logs.filter(x=>x.event==='turn_complete').map(x=>x.model),['claude-fable-5-1','claude-opus-5-5','claude-sonnet-5-5','claude-haiku-4-5-20251001']);
+ assert.deepEqual([haiku.requested,haiku.model,haiku.effort,haiku.identity],['haiku','claude-haiku-5-5','medium','Claude Haiku 5.5']);
+ assert.deepEqual(logs.filter(x=>x.event==='claude_start').map(x=>[x.model,x.claude_model,x.effort]),[['claude-fable','fable','high'],['claude-opus','opus','medium'],['claude-sonnet','sonnet','high'],['claude-haiku','haiku','medium']]);
+ assert.deepEqual(logs.filter(x=>x.event==='turn_complete').map(x=>x.model),['claude-fable-5-1','claude-opus-5-5','claude-sonnet-5-5','claude-haiku-5-5']);
+ const fixed=await setup(t,{models:parseModels({models:[{slug:'haiku-4-5',claude_model:'claude-haiku-4-5-20251001',display_name:'Claude Haiku 4.5',efforts:[],context_window:200000}]})});
+ const old=await probe(fixed.post,'model-probe',{model:'haiku-4-5',reasoning:{effort:'medium'}},'t-haiku-4-5');
+ assert.deepEqual([old.model,old.effort,old.identity],['claude-haiku-4-5-20251001',null,'Claude Haiku 4.5']);
 });
 test('unknown models and unsupported efforts are refused before Claude Code starts',async t=>{
  const {post,logs}=await setup(t);
@@ -487,16 +508,16 @@ test('a new version from an alias renames its entry, and the name survives a res
  withEnv(t,{FAKE_CLAUDE_MODEL:'claude-opus-5-6'});
  const {b,dir,post}=await setup(t);
  const names=async bridge=>(await(await fetch(bridge.url+'/v1/models',{headers:{Authorization:'Bearer fixture-secret'}})).json()).data.map(m=>m.display_name);
- assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5']);
  const first=await probe(post,'model-probe',{},'t-new');
  assert.equal(first.identity,'Claude Opus 5.5');
- assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
  assert.equal((await probe(post,'model-probe',{},'t-next')).identity,'Claude Opus 5.6');
  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir,'started-models.json'),'utf8')),{'claude-opus':'claude-opus-5-6'});
  await b.close();
  const again=await startBridge({stateDir:dir,token:'fixture-secret',port:0,claude:fixture});
  t.after(()=>again.close());
- assert.deepEqual(await names(again),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 4.5']);
+ assert.deepEqual(await names(again),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
  assert.equal(again.resolvedModels.size,0);
  const restarted=await probe((body,extra)=>fetch(again.url+'/v1/responses',{method:'POST',body:JSON.stringify(body),...extra}),'model-probe',{},'t-restart');
  assert.deepEqual([restarted.identity,restarted.pins.opus],['Claude Opus 5.6',null]);
@@ -531,7 +552,7 @@ test('a compaction fork keeps the session model even when the desktop asks with 
 });
 test('the models endpoint and health check list the catalog, auth mode and search setting',async t=>{
  const {b}=await setup(t);const get=p=>fetch(b.url+p,{headers:{Authorization:'Bearer fixture-secret'}}).then(r=>r.json());
- assert.deepEqual((await get('/v1/models')).data.map(m=>[m.id,m.display_name]),[['claude-fable','Claude Fable 5.1'],['claude-opus','Claude Opus 5.5'],['claude-sonnet','Claude Sonnet 5.5'],['claude-haiku','Claude Haiku 4.5']]);
+ assert.deepEqual((await get('/v1/models')).data.map(m=>[m.id,m.display_name]),[['claude-fable','Claude Fable 5.1'],['claude-opus','Claude Opus 5.5'],['claude-sonnet','Claude Sonnet 5.5'],['claude-haiku','Claude Haiku 5.5']]);
  const health=await get('/health');
  assert.deepEqual([health.models,health.auth,health.web_search],[['claude-fable','claude-opus','claude-sonnet','claude-haiku'],'claude_login',false]);
 });
@@ -563,6 +584,16 @@ test('completed sessions release transcript data and resume after idle eviction'
  const next={...first,input:[...first.input,...previous,...request('remember next','u2').input]};
  assert.ok(output(await(await post(next)).text()));
  assert.equal(logs.filter(x=>x.event==='claude_start').at(-1).resume,true);
+});
+test('a new side chat imports the main chat images with a note that their listed copies are not new attachments',async t=>{
+ const {post}=await setup(t);const first=request('check the checkout page');
+ const shot=[{type:'custom_tool_call',call_id:'c1',name:'exec',input:'screenshot'},{type:'custom_tool_call_output',call_id:'c1',output:[{type:'input_text',text:'checkout page'},{type:'input_image',image_url:'data:image/png;base64,YQ=='}]},{type:'message',role:'assistant',content:[{type:'output_text',text:'checked'}]}];
+ const side=request('any other runs?','u2').input[0];
+ const replay=JSON.parse(output(await(await post({...first,input:[...first.input,...shot,side]},{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'side-chat'}})).text())[0].content[0].text.slice(7));
+ assert.equal(replay.images,1);
+ assert.match(replay.input,/any other runs\?\n<\/history_message>\n<developer_message>The conversation above was imported.*not an additional attachment/s);
+ const plain=JSON.parse(output(await(await post({...first,input:[...first.input,shot[2],side]},{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'side-chat-plain'}})).text())[0].content[0].text.slice(7));
+ assert.doesNotMatch(plain.input,/imported from the desktop transcript/);
 });
 test('large screenshot histories fit normal inference and compaction after bounded replay',async t=>{
  const {post,b}=await setup(t);const first=request('summarize observed screenshots');
