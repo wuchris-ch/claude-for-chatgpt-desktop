@@ -4,6 +4,10 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. The newest checks come first.
 
+## Release 0.3.4, checked October 9, 2026
+
+The MCP SDK moves from 1.30.1 to 1.32.1 for GHSA-6qxp-vccf-f47h, a high-severity flaw in the SDK's OAuth client (stored credentials could be sent to an authorization server chosen by the MCP server). The bridge uses only the SDK's server and has no OAuth client, so it was not exposed. The other changes since 1.30.1 are a client redirect policy, two server options that stay off unless set, and acceptance of tool calls without arguments. All 143 tests pass, `npm audit` reports no vulnerabilities, and all eleven checks in `node e2e/live.mjs` pass with Claude Code 2.1.295.
+
 ## Release 0.3.3, checked October 9, 2026
 
 Version 0.3.3 lists Claude Haiku 5.5 with its effort levels, adds `install.sh`, and brings four fixes made in the separate-window bridge after 0.3.2.

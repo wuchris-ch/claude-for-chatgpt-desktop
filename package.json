@@ -1,6 +1,6 @@
 {
   "name": "claude-for-chatgpt-desktop",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Use Claude Fable, Opus, Sonnet or Haiku as the model in the ChatGPT desktop app on macOS, with the app's own tools, through your Claude Code login.",
   "license": "MIT",
   "author": "wuchris-ch",
@@ -33,7 +33,7 @@
     "test:live": "node e2e/live.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.1",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "ws": "8.22.0"
   }
 }
