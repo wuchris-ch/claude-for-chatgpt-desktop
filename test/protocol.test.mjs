@@ -218,3 +218,27 @@ test('a bare visualization reference to an existing HTML file gets the desktop m
  const lines=new VisualizeLines();assert.equal(lines.push('Working on '),'Working on ');assert.equal(lines.push('it.\nvis'),'it.\n');assert.equal(lines.push('it the page'),'visit the page');
 });
 
+
+test('GPT web searches and other hosted items in a thread reach Claude as text, without breaking it',()=>{
+ const items=[{type:'web_search_call',id:'ws_1',action:{type:'search',query:'weather'},status:'completed'},
+  {type:'image_generation_call',id:'ig_1',status:'completed',result:'A'.repeat(50000),revised_prompt:'a cat'},
+  {type:'tool_search_call',id:'ts_1'},{type:'tool_search_output',tools:[]},
+  {type:'message',role:'assistant',content:[{type:'output_text',text:'Sunny.'}]}];
+ const text=userInput(items,{replay:true,prefix:false}).map(x=>x.text).join('\n');
+ assert.match(text,/"web_search_call".*"query":"weather"/);
+ assert.match(text,/"result":"\[50000 characters left out\]".*"revised_prompt":"a cat"/);
+ assert.doesNotMatch(text,/tool_search/);assert.match(text,/Sunny\./);
+ assert.throws(()=>userInput([{type:'compaction',encrypted_content:'x'}],{replay:true,prefix:false}),/compaction/);
+});
+test('a visualization line inside any code block stays as written',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fence-'));const file=path.join(dir,'v.html');fs.writeFileSync(file,'<div>hi</div>');
+ const ref=`visualize{"path":"${file}"}`;
+ const drawn=text=>{const v=new VisualizeLines();return (v.push(text)+v.end()).includes('\ue200');};
+ try {
+  assert.equal(drawn('~~~\n```\n'+ref+'\n~~~\n'),false);
+  assert.equal(drawn('````\n```\n'+ref+'\n````\n'),false);
+  assert.equal(drawn('```js\nx\n```\n'+ref+'\n'),true);
+  assert.equal(drawn('```x``` is inline code\n'+ref+'\n'),true);
+  assert.equal(drawn('- item\n    ```\n    y\n    ```\n'+ref+'\n'),true);
+ } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});

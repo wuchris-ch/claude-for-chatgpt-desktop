@@ -153,7 +153,7 @@ export class WsResponse extends EventEmitter {
   }
   destroy(){this.destroyed=true;this.end();}
   // The app interrupted or closed the connection: like a closed HTTP stream.
-  abort(){if(!this.writableEnded)this.emit('close');}
+  abort(){if(!this.writableEnded){this.destroyed=true;this.emit('close');}}
 }
 
 // Claude's side of one app WebSocket. The app sends a response.create per
@@ -165,8 +165,11 @@ class ClaudeChannel {
     if(this.client.readyState===WebSocket.OPEN)this.client.send(JSON.stringify({type:'error',status,error:{type:'invalid_request_error',code,message}}));
   }
   async create(message) {
+    // An interrupt ends the response at once, but the app can send the next
+    // request in the same packet, before the channel has released it.
+    while(this.res?.writableEnded)await this.busy;
     if(this.res)return this.error(409,'A Claude response is already streaming on this connection.');
-    const {type,previous_response_id:previous,generate,client_metadata:metadata={},...body}=message;
+    const {type,previous_response_id:previous,generate,client_metadata,...body}=message;const metadata=client_metadata??{};
     let input=Array.isArray(body.input)?body.input:[];
     if(previous) {
       if(this.last?.id!==previous)return this.error(400,'The previous Claude response is not on this connection.','previous_response_not_found');
@@ -183,11 +186,12 @@ class ClaudeChannel {
     if(metadata['x-codex-turn-metadata'])headers['x-codex-turn-metadata']=metadata['x-codex-turn-metadata'];
     if(metadata.thread_id)headers['thread-id']=metadata.thread_id;
     const res=new WsResponse(this.client);this.res=res;
+    let release;this.busy=new Promise(resolve=>{release=resolve;});
     try{await this.serve({headers,method:'POST',gateway:'websocket'},res,{...body,input,stream:true});}
     catch(error){if(!res.writableEnded){res.statusCode=error.statusCode??500;res.end(JSON.stringify({error:{message:error.message}}));}}
     await res.done;
     this.last=res.responseId?{id:res.responseId,input,output:res.output}:null;
-    this.res=null;this.onIdle?.();
+    this.res=null;release();this.onIdle?.();
   }
   interrupt(){this.res?.abort();}
 }
@@ -234,7 +238,7 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
   function handleUpgrade(req,socket,head,sub,url) {
     const fail=(status,text)=>{socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);};
     const target=new URL(upstream.replace(/^http/,'ws')+sub+url.search);
-    const offered=String(req.headers['sec-websocket-protocol']??'').split(',').map(x=>x.trim()).filter(Boolean);
+    const offered=[...new Set(String(req.headers['sec-websocket-protocol']??'').split(',').map(x=>x.trim()).filter(Boolean))];
     const up=new WebSocket(target,offered.length?offered:undefined,{headers:forwardHeaders(req.headers,HANDSHAKE),perMessageDeflate:true,handshakeTimeout:15000,maxPayload:256*1024*1024});
     let settled=false,extra=[];
     up.on('upgrade',response=>{
@@ -243,25 +247,36 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
         for(const v of [value].flat())extra.push(`${name}: ${name==='x-models-etag'?tagEtag(v,tagNow()):v}`);
       }
     });
+    // A refusal, such as an expired login or a usage limit, reaches the app
+    // with OpenAI's explanation. The body is read in full before the upstream
+    // request is closed, and a body that never ends is cut off.
     up.on('unexpected-response',(request,response)=>{
-      settled=true;const chunks=[];
-      response.on('data',c=>chunks.push(c));
-      response.on('end',()=>{
+      settled=true;const chunks=[];let sent=false;
+      const send=()=>{
+        if(sent)return;sent=true;clearTimeout(timer);
         const body=Buffer.concat(chunks);
         const lines=[`HTTP/1.1 ${response.statusCode} ${response.statusMessage??''}`];
         for(const [name,value] of Object.entries(response.headers))if(!HOP.has(name))for(const v of [value].flat())lines.push(`${name}: ${v}`);
         lines.push('Connection: close','Content-Length: '+body.length,'','');
         socket.end(Buffer.concat([Buffer.from(lines.join('\r\n')),body]));
         log('gateway_ws_refused',{status:response.statusCode});
-      });
-      request.destroy();
+        request.destroy();
+      };
+      const timer=setTimeout(send,10000);
+      response.on('data',c=>chunks.push(c));
+      response.on('end',send);response.on('error',send);response.on('aborted',send);
     });
     up.on('error',error=>{if(!settled){settled=true;log('gateway_upstream_error',{code:error.code,transport:'websocket'});fail(502,'Bad Gateway');}});
+    let handed=false,gone=false;
     up.on('open',()=>{
       settled=true;handshakeHeaders.set(req,extra);if(up.protocol)protocols.set(req,up.protocol);
-      wss.handleUpgrade(req,socket,head,client=>sub==='/responses'?relay(client,up,req):pipe(client,up,sub));
+      if(gone||socket.destroyed){up.terminate();socket.destroy();return;}
+      handed=true;wss.handleUpgrade(req,socket,head,client=>sub==='/responses'?relay(client,up,req):pipe(client,up,sub));
     });
     socket.on('error',()=>up.terminate());
+    // The app gave up before OpenAI answered: nothing else would close OpenAI's side.
+    const leave=()=>{if(handed)return;gone=true;up.terminate();socket.destroy();};
+    socket.on('end',leave);socket.on('close',leave);
   }
 
   function relay(client,up,req) {
@@ -272,7 +287,10 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     client.on('message',(data,isBinary)=>{try{
       let message=null;
       if(!isBinary)try{message=JSON.parse(data.toString());}catch{}
-      if(message?.type==='response.create'&&bridge.models.get(message.model)){claude.create(message);return;}
+      if(message?.type==='response.create'&&bridge.models.get(message.model)) {
+        claude.create(message).catch(error=>{log('gateway_ws_error',{message:error.message});claude.res=null;claude.error(500,'The bridge could not answer this request: '+error.message);});
+        return;
+      }
       if(message?.type==='response.interrupt'&&claude.owns(message.response_id)){claude.interrupt();return;}
       if(message?.type==='response.create') {
         const prepared=prepareForOpenAI(message.input,bridge.token);

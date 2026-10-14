@@ -116,5 +116,9 @@ def activate():
     start_service(expected_version)
 
 stop_service()
+# The service appends to one log while it runs. An install starts a new log
+# once it passes 20 MB, keeping the previous one.
+log_file=runtime/'logs/bridge.jsonl'
+if log_file.exists() and log_file.stat().st_size>20*1024*1024:log_file.replace(runtime/'logs/bridge.jsonl.1')
 switch_release(app,stage,runtime/'launch.json',agent,activate,stop_service,lambda:start_service(previous_version))
 print(f'Installed {APP_NAME} {expected_version} as {label} on port {port}. macOS restarts it if it exits.')

@@ -2,7 +2,67 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, and 0.3.6 fixes found in a review of picker mode. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, and 0.3.7 fixes from an adversarial review of the whole project. The newest checks come first.
+
+## Release 0.3.7, checked October 14, 2026
+
+An adversarial review of the whole project, with reproductions against the app's own runtime and the bridge source, found these problems. Each new test below fails on 0.3.6 unless noted.
+
+### A GPT web search broke the thread for Claude
+
+In picker mode GPT gets OpenAI's hosted `web_search` tool. Once GPT used it, every later request in the thread carried a `web_search_call` item, which the bridge could not turn into Claude's input, so every Claude request and every Claude compaction in that thread failed with "Cannot safely import conversation item web_search_call". The app's runtime 0.162.0-alpha.17.2, run against a stand-in for OpenAI, sent that item in the next request after a search. Items from another model's hosted tools now reach Claude as text, with long values such as generated images left out; GPT's tool lookups are skipped.
+
+### Message sent with an interrupt
+
+The app sends a message typed during a Claude response as `response.interrupt` followed by a new `response.create`. When both arrived in one packet, the second found the interrupted response not yet released and was refused with 409, "A Claude response is already streaming on this connection". It now waits for the interrupted response to finish closing.
+
+### Stops at the wrong moment
+
+- A Stop or disconnect before the bridge attached its close listener, while the request was still being set up, went unseen and the turn ran to the end with no one reading it. The bridge now notes a close from the moment it accepts a request, and does not start Claude Code for a request that has already gone.
+- A tool result waits up to 5 seconds for Claude Code to confirm a message sent with it. A Stop in that window marked the message as seen and still delivered the result to a stopped process, so both were missing when the turn resumed. They are now kept for the resumed turn, and the wait ends at once.
+
+### Other session fixes
+
+- The MCP configuration, which holds the bridge token, was passed to `claude -p` on its command line, where any local user could read it during a turn. It is now an owner-only file.
+- The next request in a thread waits for the previous Claude Code process to exit. One that kept running after its turn would have held the thread forever; it is now stopped after 15 seconds. In the separate-window bridge's log, the slowest of 1,919 exits took 3.3 seconds.
+- A session record that could not be read made every request in its thread fail. It is now set aside and the thread is imported again.
+
+### Gateway
+
+- An error while reading a WebSocket upgrade request, such as a malformed URL, was thrown outside any handler and stopped the bridge. It now gets 400. A WebSocket attempt outside the gateway, such as the app trying one on the separate window's provider, now gets 404 instead of 401, so the app falls back to HTTP as it did with the separate-window bridge.
+- When OpenAI refused a WebSocket, such as for an expired login, the refusal's body could be cut off, and a body that never ended held the connection. The body is now read in full, with a 10-second limit.
+- When the app gave up on a WebSocket before OpenAI answered, the connection to OpenAI stayed open. It is now closed.
+- A failure to start a Claude response over the WebSocket now reaches the app as an error instead of leaving the request unanswered.
+- Code blocks are tracked as Markdown defines them, so a `visualize{...}` line inside a `~~~` block, or a block opened with four backticks, stays as written, and inline code with three backticks no longer opens a block.
+
+### Install and uninstall
+
+- `picker.py` now keeps `config.toml` owner-only while its setting holds the gateway key, and restores the file's mode when picker mode is turned off. Its temporary files and the key file are created owner-only.
+- A `config.toml` with a multi-line string before the first table got the setting inside the string. The setting now goes after it.
+- A setting left by an earlier installation whose runtime folder is gone is replaced instead of refused.
+- Two installs in the same second wrote the same backup folder. Backup names are now unique. Taking the setting out of a file edited since the install no longer leaves an extra blank line before the next table.
+- Changing the port or label with setup while picker mode is on left GPT pointing at the old address. Setup now refuses until picker mode is off.
+- Running the installer again without an option turned picker mode on for a separate-window installation. An update now keeps whichever you use; `--picker` or `--window` switches.
+- `install.sh --uninstall` without the runtime folder now also removes the background service, which otherwise kept restarting against missing files.
+- An install starts a new log once the old one passes 20 MB.
+
+### Automated tests in 0.3.7
+
+165 tests pass: 131 Node tests and 34 Python tests. New in 0.3.7:
+
+- A GPT web search and a generated image in a thread reach Claude as text, and the thread keeps working.
+- An interrupt and a new request in one WebSocket packet start the next Claude response.
+- A Stop while a mid-turn message waits keeps the message and the tool result for the resumed turn.
+- Requests dropped at once over HTTP and WebSocket leave no Claude Code process running. These pass on 0.3.6 too, because the drop rarely lands in the setup window; they guard the result.
+- A process that keeps running after its turn is stopped, and the next turn starts.
+- An unreadable session record is set aside and the thread continues.
+- A WebSocket attempt on the separate window's provider gets 404.
+- Code blocks of each kind keep a visualization line as written.
+- Picker mode makes `config.toml` owner-only and turning it off restores the mode; a multi-line string, a leftover setting and two installs in one second are handled; setup refuses a new port or label while picker mode is on.
+
+### Live checks in 0.3.7
+
+On October 14, 2026, with Claude Code 2.1.300, seven live checks through the bridge source passed with no bridge errors: a tool call, a mid-turn message, Stop then continue, a mid-turn compaction, a message sent mid-response, an inline visualization, and a switch from Opus to Sonnet that resumed the native session.
 
 ## Release 0.3.6, checked October 14, 2026
 

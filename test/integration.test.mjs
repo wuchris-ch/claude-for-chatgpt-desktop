@@ -44,6 +44,33 @@ test('aborting a stream cancels inference and the next turn recovers from deskto
  const next=await(await post(request('continue after interruption','user2'))).text();
  assert.ok(output(next));assert.ok(logs.some(x=>x.event==='interrupted_turn_recovery'));
 });
+test('a WebSocket attempt on the window provider gets 404, so the app falls back to HTTP',async t=>{
+ const {b}=await setup(t);const {port}=new URL(b.url);
+ const socket=net.connect(Number(port),'127.0.0.1');t.after(()=>socket.destroy());
+ let data='';socket.on('data',d=>data+=d);await new Promise(r=>socket.once('connect',r));
+ socket.write('GET /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer fixture-secret\r\n\r\n');
+ for(let i=0;i<100&&!data.includes('\r\n');i++)await new Promise(r=>setTimeout(r,10));
+ assert.match(data,/^HTTP\/1\.1 404/);
+});
+test('a Claude process that keeps running after its turn is stopped, so the next turn does not wait forever',async t=>{
+ const {post,logs}=await setup(t,{exitGraceMs:300});
+ const first=request('linger-after-turn');
+ const a=output(await(await post(first)).text());assert.ok(a);
+ for(let i=0;i<200&&!logs.some(x=>x.event==='claude_exit');i++)await new Promise(r=>setTimeout(r,10));
+ assert.ok(logs.some(x=>x.event==='claude_exit_overdue'));
+ assert.ok(output(await(await post({...first,input:[...first.input,...a,...request('next','user2').input]})).text()));
+});
+test('an unreadable session record is set aside and the thread is imported again',async t=>{
+ const {post,dir,logs}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ for(let i=0;i<200&&!logs.some(x=>x.event==='claude_exit');i++)await new Promise(r=>setTimeout(r,10));
+ const record=fs.readdirSync(dir).find(x=>/^[0-9a-f]{64}\.json$/.test(x));
+ fs.writeFileSync(path.join(dir,record),'{"claudeId":');
+ const {post:again,logs:after}=await setup(t,{stateDir:dir});
+ assert.ok(output(await(await again({...first,input:[...first.input,...a,...request('still there?','user2').input]})).text()));
+ assert.ok(after.some(x=>x.event==='session_record_unreadable'));
+ assert.ok(fs.existsSync(path.join(dir,record+'.unreadable')));
+});
 test('wrong model, missing authentication, and browser origins are rejected',async t=>{
  const {b,post}=await setup(t);
  assert.equal((await fetch(b.url+'/health')).status,401);
@@ -268,6 +295,30 @@ test('an unconfirmed mid-turn message does not hold the tool result forever',asy
  const final=JSON.stringify(output(await(await post({...first,input:[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'completed once'},...request('never-queued note','user2').input]})).text()));
  assert.match(final,/RESULT.*STEERED.*never-queued note/);
  assert.ok(logs.some(x=>x.event==='steering_unconfirmed'));
+});
+test('Stop while a mid-turn message waits to be queued keeps the message and the tool result for the resumed turn',async t=>{
+ const {post,logs}=await setup(t);const first=request('invoke-tool');
+ const call=output(await(await post(first)).text())[0];
+ const input=[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'completed once'},...request('never-queued note','user2').input];
+ const abort=new AbortController();const pending=post({...first,input},{signal:abort.signal}).then(r=>r.text()).catch(()=>{});
+ for(let i=0;i<200&&!logs.some(x=>x.event==='user_steering');i++)await new Promise(r=>setTimeout(r,10));
+ abort.abort();await pending;
+ for(let i=0;i<200&&!logs.some(x=>x.event==='claude_exit');i++)await new Promise(r=>setTimeout(r,10));
+ assert.equal(logs.some(x=>x.event==='tool_result'),false);
+ const next=JSON.stringify(output(await(await post({...first,input:[...input,...request('continue','user3').input]})).text()));
+ assert.match(next,/RESUMED.*completed once.*never-queued note.*continue/);
+});
+test('a request the desktop drops before Claude starts leaves no Claude process running',async t=>{
+ const {b,post}=await setup(t);const {port}=new URL(b.url);
+ const body=JSON.stringify(request('slow-response'));
+ for(let i=0;i<5;i++) {
+  const socket=net.connect(Number(port),'127.0.0.1');await new Promise(r=>socket.once('connect',r));
+  socket.write(`POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer fixture-secret\r\nContent-Type: application/json\r\nthread-id: dropped-${i}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,()=>socket.destroy());
+ }
+ await new Promise(r=>setTimeout(r,500));
+ assert.equal(b.sessions.size>0,true);
+ for(const session of b.sessions.values())assert.equal(session.child,null,'a Claude process was left running');
+ assert.ok(output(await(await post(request('hello'),{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'dropped-0'}})).text()));
 });
 test('a reply to a mid-turn message written only in thinking is shown before the next tool call',async t=>{
  const {post,logs}=await setup(t);const first=request('invoke-tool');

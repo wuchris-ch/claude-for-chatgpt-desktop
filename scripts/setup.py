@@ -88,6 +88,10 @@ def main(argv=None):
     parser.add_argument('--share-skills', action='store_true', help='Link ~/.codex/skills into the profile')
     parser.add_argument('--app', default=previous.get('app', DEFAULT_APP), help='Path to ChatGPT.app')
     args = parser.parse_args(argv)
+    # The app's config.toml names the port, and uninstall finds the service by
+    # its label, so neither can change under picker mode.
+    if (runtime/'picker.json').exists() and previous and (args.port, args.label) != (previous.get('port', DEFAULT_PORT), previous.get('label', DEFAULT_LABEL)):
+        raise SystemExit('Picker mode is on. Turn it off first (python3 scripts/picker.py uninstall), then change the port or label and turn it on again.')
 
     source, codex = source_home(), runtime/'codex'
     print('Reading settings and plugins from', source)

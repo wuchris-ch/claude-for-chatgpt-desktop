@@ -12,7 +12,9 @@ const ALIASES={fable:'claude-fable-5-1',opus:'claude-opus-5-5',sonnet:'claude-so
 const PINS={fable:process.env.ANTHROPIC_DEFAULT_FABLE_MODEL,opus:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,haiku:process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL};
 const requested=arg('--model');
 const model=process.env.FAKE_CLAUDE_MODEL||PINS[requested]||ALIASES[requested]||requested;
-const config=JSON.parse(arg('--mcp-config')).mcpServers.chatgpt;
+// Like Claude Code, --mcp-config takes a file path or inline JSON.
+const mcpArg=arg('--mcp-config');
+const config=JSON.parse(mcpArg.trimStart().startsWith('{')?mcpArg:fs.readFileSync(mcpArg,'utf8')).mcpServers.chatgpt;
 const countFile=path.join(path.dirname(arg('--system-prompt-file')),'fake-starts');
 fs.appendFileSync(countFile,'start\n');
 const send=x=>process.stdout.write(JSON.stringify(x)+'\n');
@@ -26,9 +28,11 @@ const listed=await client.listTools();
 send({type:'system',subtype:'init',model,tools:['mcp__chatgpt__exec'],mcp_servers:[{name:'chatgpt',status:'connected'}]});
 const input=readline.createInterface({input:process.stdin});
 // Like Claude Code, input that arrives while a tool call waits joins the same turn after the result.
-let busy=false;const queued=[];
+// linger-after-turn: a process that keeps running after its input closes.
+let busy=false,linger=false;const queued=[];
 input.on('line',async line=>{
  const msg=JSON.parse(line);const request=JSON.stringify(msg.message.content);
+ if(request.includes('linger-after-turn'))linger=true;
  // Like Claude Code, a message sent with a uuid is confirmed once queued. A large
  // message (an image) can finish parsing after a tool result has returned.
  const confirm=()=>{if(msg.uuid&&!request.includes('never-queued'))send({type:'command_lifecycle',command_uuid:msg.uuid,state:'queued'});};
@@ -126,5 +130,5 @@ input.on('line',async line=>{
   text('RESULT '+JSON.stringify(result)+(queued.length?' STEERED '+JSON.stringify(queued.splice(0)):''));
  }else text('FINAL '+request);
 });
-input.on('close',async()=>{await client.close();process.exit(0);});
+input.on('close',async()=>{await client.close();if(linger){setInterval(()=>{},1000);return;}process.exit(0);});
 process.on('SIGINT',()=>{if(process.listenerCount('SIGINT')===1)process.exit(130);});

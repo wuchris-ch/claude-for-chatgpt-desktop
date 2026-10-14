@@ -50,9 +50,16 @@ const modelChanged=(actual,expected)=>new Error(`Claude Code answered with ${act
 export class Session {
   constructor(bridge, key) {
     this.bridge = bridge; this.key = key; this.id = digest(key); this.file = path.join(bridge.stateDir, `${this.id}.json`);
-    this.record = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : {claudeId: randomUUID(), seen: [], started: false};
+    this.record = this.load();
     this.pending = new Map(); this.nativeCalls = []; this.results = new Map(); this.textIndices = []; this.tools = [];this.callWaiters=new Set();this.queued=new Map();this.ack=null;
     this.lastUsed=Date.now();
+  }
+  // A record that cannot be read is set aside, and the thread is imported
+  // again from the desktop's history instead of failing every request.
+  load() {
+    try {if(fs.existsSync(this.file))return JSON.parse(fs.readFileSync(this.file,'utf8'));}
+    catch(error) {fs.renameSync(this.file,this.file+'.unreadable');this.log('session_record_unreadable',{message:error.message});}
+    return {claudeId: randomUUID(), seen: [], started: false};
   }
   save() {
     const temp = this.file+'.tmp'; fs.writeFileSync(temp, JSON.stringify(this.record), {mode:0o600}); fs.renameSync(temp,this.file);
@@ -143,9 +150,10 @@ export class Session {
     this.child.stdin.write(JSON.stringify({type:'user',uuid,message:{role:'user',content:steeringPrompt(fresh)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
     this.log('user_steering',{messages:fresh.length});
     if(fresh.some(x=>x.type==='message'&&x.role==='user'))this.ack={thinking:''};
+    const keys=fresh.map(inputKey);
     return new Promise(resolve=>{
       const timer=setTimeout(()=>{if(this.queued.delete(uuid)){this.log('steering_unconfirmed',{});resolve();}},STEER_CONFIRM_MS);timer.unref();
-      this.queued.set(uuid,()=>{clearTimeout(timer);resolve();});
+      this.queued.set(uuid,{keys,release:()=>{clearTimeout(timer);this.queued.delete(uuid);resolve();}});
     });
   }
   // New messages for Claude in input order: the given user and agent messages
@@ -206,11 +214,13 @@ export class Session {
     if(this.accepting)throw new Error('This conversation is already accepting a request.');
     this.accepting=true;
     this.lastUsed=Date.now();
-    try {await this.acceptRequest(body,res,onComplete);}
+    // The desktop can stop or disconnect while the request is still being set up.
+    let gone=!!res.destroyed;const left=()=>{gone=true;};res.once('close',left);
+    try {await this.acceptRequest(body,res,onComplete,()=>gone);}
     catch(error){if(this.stream?.res===res)this.fail(error.message);throw error;}
-    finally {this.accepting=false;}
+    finally {this.accepting=false;res.off('close',left);}
   }
-  async acceptRequest(body,res,onComplete) {
+  async acceptRequest(body,res,onComplete,gone) {
     if(this.exiting) await this.exiting;
     if(this.stream && !this.stream.finished) throw new Error('This conversation already has an active response.');
     this.stopping=false;this.resumeItems=null;
@@ -255,12 +265,14 @@ export class Session {
     this.streamInput=originalInput;
     const activeStream=this.stream;
     res.on('close',()=> {if(!activeStream.finished && this.stream===activeStream)this.cancel('Desktop cancelled or disconnected.');});
+    if(gone()){this.cancel('Desktop cancelled or disconnected.');return;}
     if(this.child) {
       await this.mcp.sendToolListChanged().catch(()=>{});
       if(superseded) {
         const fresh=this.withNotes(body.input,body.input.filter(x=>isIncoming(x)&&!this.pendingSeen.includes(inputKey(x))),this.record.historyWithoutCalls);
         this.pendingSeen.push(...fresh.map(inputKey));
         await this.steer(fresh);
+        if(this.stream!==activeStream)return;
         for(const call of superseded)this.supersede(call);
         return;
       }
@@ -270,6 +282,8 @@ export class Session {
       if(fresh.length) {
         this.pendingSeen.push(...fresh.map(inputKey));
         await this.steer(fresh);
+        // Stopped while the message waited: the results go to the resumed session.
+        if(this.stream!==activeStream)return;
       }
       for(const item of results)this.deliverResult(item);
       // With parallel_tool_calls=false, calls from one Claude message are
@@ -314,10 +328,14 @@ export class Session {
     const config={mcpServers:{chatgpt:{type:'http',url:`${this.bridge.url}/mcp/${this.id}`,headers:{Authorization:`Bearer ${this.bridge.token}`}}}};
     const systemFile=path.join(this.bridge.stateDir,`${this.id}.system.txt`);
     fs.writeFileSync(systemFile,fork?.prompt??prompt,{mode:0o600});
+    // The config holds the bridge token, which any local user could read from
+    // the process list if it were passed inline.
+    const mcpFile=path.join(this.bridge.stateDir,`${this.id}.mcp.json`);
+    fs.writeFileSync(mcpFile,JSON.stringify(config),{mode:0o600});
     this.record.instructions=digest(fork?.prompt??prompt);this.record.effort=effort;this.record.model=runModel.slug;
     this.schema=outputSchema(body);
     const args=['-p','--model',runModel.claude_model,...(effort?['--effort',effort]:[]),'--input-format','stream-json','--output-format','stream-json','--verbose','--include-partial-messages',
-      '--tools','','--strict-mcp-config','--mcp-config',JSON.stringify(config),'--allowedTools','mcp__chatgpt__*','--permission-mode','dontAsk',
+      '--tools','','--strict-mcp-config','--mcp-config',mcpFile,'--allowedTools','mcp__chatgpt__*','--permission-mode','dontAsk',
       '--setting-sources','','--disable-slash-commands','--system-prompt-snapshot','off','--system-prompt-file',systemFile,
       ...(this.schema?['--json-schema',JSON.stringify(this.schema)]:[]),
       ...(fork?['--resume',fork.claudeId,'--fork-session']:[this.record.started||this.resumeItems?'--resume':'--session-id',this.record.claudeId])];
@@ -352,6 +370,7 @@ export class Session {
       if(!key)throw new Error('API key mode is on, but no ANTHROPIC_API_KEY is available to the bridge.');
       env.ANTHROPIC_API_KEY=key;
     }
+    if(this.stream!==activeStream)return;
     this.runModel=runModel;this.activeModel=null;
     this.child=spawn(this.bridge.claude,args,{cwd:this.bridge.claudeCwd,env,stdio:['pipe','pipe','pipe']});
     this.stopping=false;
@@ -377,7 +396,7 @@ export class Session {
   onEvent(msg) {
     if(this.stopping)return;
     if(msg.type==='command_lifecycle'&&msg.state==='queued') {
-      const release=this.queued.get(msg.command_uuid);if(release){this.queued.delete(msg.command_uuid);release();}
+      this.queued.get(msg.command_uuid)?.release();
       return;
     }
     if(['assistant','stream_event','result'].includes(msg.type)&&!(msg.type==='result'&&msg.queued_turn_count>0)&&(!this.stream||this.stream.finished)) {
@@ -469,7 +488,7 @@ export class Session {
       this.completeStream();
       if(compacted)this.releaseCompactedTurn();
       const child=this.child;
-      if(child){this.exiting=this.childDone;child.stdin.end();}
+      if(child){this.exiting=this.childDone;child.stdin.end();this.reap(child);}
     }
     if(msg.type==='system'&&msg.subtype==='api_retry')this.log('upstream_retry',{attempt:msg.attempt,status:msg.error?.status});
   }
@@ -506,6 +525,14 @@ export class Session {
     if(this.stream){this.stream.onComplete=null;this.stream.frames=[];this.stream.output=[];this.stream.res=null;}
     this.stream=null;this.streamInput=null;this.textIndices=[];this.lastUsed=Date.now();
   }
+  // Claude Code exits within about 3 s of its input closing (1,919 turns). One
+  // that hangs is stopped, or the thread's next request would wait forever.
+  reap(child) {
+    const grace=this.bridge.exitGraceMs??15000;
+    const term=setTimeout(()=>{if(this.child===child){this.log('claude_exit_overdue',{});child.kill('SIGTERM');}},grace);term.unref();
+    const kill=setTimeout(()=>{if(this.child===child)child.kill('SIGKILL');},grace+5000);kill.unref();
+    this.childDone.finally(()=>{clearTimeout(term);clearTimeout(kill);});
+  }
   stopChild(signal) {
     const child=this.child;if(!child)return;
     this.stopping=true;this.exiting=this.childDone;
@@ -520,8 +547,11 @@ export class Session {
     // What the stopped session saw, so a resume sends only the rest.
     if(this.child&&this.ready&&!this.stopping&&this.record.inflight) {
       const sent=this.nativeCalls.filter(c=>c.emitted&&!this.record.delivered?.includes(c.id)).length;
-      this.record.stop={reason,seen:this.pendingSeen,sent};if(this.stream)this.record.lastReplyAt=Date.now();this.save();
+      // A mid-turn message Claude Code had not yet queued is sent again on resume.
+      const unqueued=[...this.queued.values()].flatMap(q=>q.keys);
+      this.record.stop={reason,seen:this.pendingSeen.filter(k=>!unqueued.includes(k)),sent};if(this.stream)this.record.lastReplyAt=Date.now();this.save();
     }
+    for(const q of [...this.queued.values()])q.release();
     this.stream?.end();this.releaseResponse();this.stopChild('SIGINT');
   }
 }

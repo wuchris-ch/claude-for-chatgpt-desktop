@@ -125,5 +125,27 @@ class ServiceEnvironmentTests(unittest.TestCase):
         self.assertEqual(source_home(), pathlib.Path.home()/'.codex')
 
 
+
+class PickerGuardTests(unittest.TestCase):
+    def test_the_port_cannot_change_while_picker_mode_is_on(self):
+        import json
+        import setup
+        with tempfile.TemporaryDirectory(prefix='bridge-setup-guard-') as root:
+            runtime = pathlib.Path(root)
+            (runtime/'launch.json').write_text(json.dumps({'port': 19480, 'label': DEFAULT_LABEL}))
+            (runtime/'picker.json').write_text('{}')
+            saved = os.environ.get('CLAUDE_BRIDGE_RUNTIME')
+            os.environ['CLAUDE_BRIDGE_RUNTIME'] = root
+            try:
+                with self.assertRaises(SystemExit) as raised:
+                    setup.main(['--port', '19500'])
+                self.assertIn('Picker mode is on', str(raised.exception))
+            finally:
+                if saved is None:
+                    os.environ.pop('CLAUDE_BRIDGE_RUNTIME')
+                else:
+                    os.environ['CLAUDE_BRIDGE_RUNTIME'] = saved
+
+
 if __name__ == '__main__':
     unittest.main()

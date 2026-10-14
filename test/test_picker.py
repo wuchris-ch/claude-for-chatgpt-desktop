@@ -56,7 +56,8 @@ class PickerTests(unittest.TestCase):
         backup = pathlib.Path(state['backup'])
         self.assertEqual((backup/'config.toml').read_bytes(), CONFIG)
         self.assertEqual((backup/'models_cache.json').read_text(), '{"models":[{"slug":"gpt-6-astra"}]}')
-        self.assertEqual((self.codex/'config.toml').stat().st_mode & 0o777, 0o644)
+        # The setting holds the gateway key, so only the owner may read it.
+        self.assertEqual((self.codex/'config.toml').stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.runtime/'gateway-key').stat().st_mode & 0o777, 0o600)
         self.run_picker('install')
         self.assertEqual((self.codex/'config.toml').read_text(), text)
@@ -66,6 +67,7 @@ class PickerTests(unittest.TestCase):
         (self.codex/'models_cache.json').write_text('{"models":[{"slug":"gpt-6-astra"},{"slug":"claude-opus"}]}')
         self.run_picker('uninstall')
         self.assertEqual((self.codex/'config.toml').read_bytes(), CONFIG)
+        self.assertEqual((self.codex/'config.toml').stat().st_mode & 0o777, 0o644)
         self.assertEqual((self.codex/'models_cache.json').read_text(), '{"models":[{"slug":"gpt-6-astra"}]}')
         self.assertFalse((self.runtime/'picker.json').exists())
         self.assertFalse((self.runtime/'gateway-key').exists())
@@ -117,6 +119,29 @@ class PickerTests(unittest.TestCase):
         self.run_picker('uninstall')
         self.assertTrue((self.codex/'config.toml').is_symlink())
         self.assertEqual(target.read_bytes(), CONFIG)
+
+    def test_a_bracket_line_inside_a_multi_line_string_is_not_a_table(self):
+        text = 'developer_instructions = """\nUse footnotes.\n[1]: like this\n"""\nmodel = "gpt-6-astra"\n\n[features]\ngoals = true\n'
+        (self.codex/'config.toml').write_text(text)
+        self.run_picker('install')
+        result = (self.codex/'config.toml').read_text()
+        self.assertTrue(result.startswith(text.split('\n[features]')[0]))
+        self.assertIn('\nopenai_base_url = "http://127.0.0.1:19490/g/', result.split('[features]')[0])
+        self.assertNotIn('openai_base_url', result.split('"""')[1])
+
+    def test_install_replaces_a_setting_left_by_an_earlier_installation(self):
+        self.run_picker('install')
+        for name in ['picker.json', 'gateway-key']:
+            (self.runtime/name).unlink()
+        self.run_picker('install')
+        text = (self.codex/'config.toml').read_text()
+        key = (self.runtime/'gateway-key').read_text()
+        self.assertEqual(text.count('openai_base_url'), 1)
+        self.assertIn('/g/'+key+'/', text)
+        backup = pathlib.Path(json.loads((self.runtime/'picker.json').read_text())['backup'])
+        self.assertEqual((backup/'config.toml').read_bytes(), CONFIG)
+        self.run_picker('uninstall')
+        self.assertEqual((self.codex/'config.toml').read_bytes(), CONFIG)
 
     def test_an_existing_openai_base_url_is_left_alone(self):
         (self.codex/'config.toml').write_bytes(b'openai_base_url = "https://proxy.example/v1"\n' + CONFIG)

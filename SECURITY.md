@@ -22,6 +22,8 @@ In scope:
 
 Problems in Claude Code, the ChatGPT app or the models themselves belong with Anthropic or OpenAI.
 
+Known limit: the app finds the bridge by its port alone. On a Mac shared with other users, a program another user starts on that port while the bridge is stopped would receive the app's GPT requests, including its ChatGPT login. Turn picker mode off on shared Macs.
+
 ## Supported versions
 
 Fixes go into the latest version on `main`.

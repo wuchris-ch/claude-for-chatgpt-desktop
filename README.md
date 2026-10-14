@@ -2,14 +2,14 @@
 
 **Claude in the ChatGPT desktop app's model picker, right next to GPT.** For macOS.
 
-![Animated walkthrough: choosing Claude Fable 5.1 in the model picker, Claude running the tests and reading a page in the in-app browser, and a message sent while it works](docs/demo.gif)
+![Illustrated walkthrough, redrawn from the app: choosing Claude Fable 5.1 in the model picker, Claude running the tests and reading a page in the in-app browser, and a message sent while it works](docs/demo.gif)
 
 - **Pick Claude Fable, Opus, Sonnet or Haiku** in any chat.
 - **Claude uses the app's own tools:** the in-app browser, computer control, terminal, file edits and plugins.
 - **Switch between Claude and GPT** in the same chat.
-- **Runs on your own Claude Code login.** GPT keeps working exactly as before.
+- **Runs on your own Claude Code login.** GPT keeps its own login and features; its requests pass through the bridge on your Mac.
 
-Full 50-second demo: [docs/demo.mp4](docs/demo.mp4)
+Full 50-second illustrated demo: [docs/demo.mp4](docs/demo.mp4)
 
 > Unofficial. Not affiliated with Anthropic or OpenAI. Usage counts against your Claude plan, like any Claude Code session ([Anthropic's notes](https://code.claude.com/docs/en/legal-and-compliance)).
 
@@ -31,14 +31,14 @@ curl -fsSL \
 
 **Then** pick a Claude model in ChatGPT. The installer offers to reopen ChatGPT for you.
 
-- **Update:** run the same command again.
+- **Update:** run the same command again. An update keeps the picker or the separate window, whichever you use; `--picker` or `--window` switches.
 - **Remove:** add `-s -- --uninstall` after `bash`.
 - **Leave your normal ChatGPT untouched:** add `-s -- --window` after `bash` for a separate Claude-only window.
 
 <details>
 <summary>What the installer does</summary>
 
-1. Checks for Node.js 24 or later (and offers to install it with Homebrew) and for your Claude Code sign-in.
+1. Checks for Node.js 24 or later (and offers to install or upgrade it with Homebrew) and for your Claude Code sign-in.
 2. Downloads this repository to `~/Library/Application Support/Claude for ChatGPT Desktop/source`.
 3. Installs a small background service that listens only on 127.0.0.1.
 4. Backs up your ChatGPT settings and adds one setting, `openai_base_url`.
@@ -94,22 +94,24 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Fast and cheap on long chats**
 
-- One warm Claude process per chat. In daily use, 97 to 98% of input tokens came from the prompt cache.
+- One Claude Code session per chat, resumed each turn and kept running through its tool calls. In daily use, 97 to 98% of input tokens came from the prompt cache.
 - Compaction reuses the cache, even when it fires in the middle of a turn.
 - Chats full of screenshots stay under the request size limit, and a tool call the app never answers can't hold a session forever.
 
 **Tested**
 
-- 153 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 165 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
 - **macOS only.** Tested with ChatGPT 26.1007.71326 (Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.300 and Node.js 24.21. A later app or Claude Code release can need an update here.
 - **Local tasks only.** Cloud tasks, voice, image generation and other OpenAI-hosted features stay with GPT. OpenAI-hosted tools, such as GPT's built-in web search, are left out of Claude's tools.
-- **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. The uninstall command works even when the service or its folder is gone. Picker mode needs a ChatGPT sign-in, doesn't use proxy settings, and isn't meant for ChatGPT workspaces with data-residency routing.
+- **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. The setting is in the shared `~/.codex/config.toml`, so the Codex CLI and IDE extension also go through the bridge. The uninstall command works even when the service or its folder is gone. Picker mode needs a ChatGPT sign-in, doesn't use proxy settings, and isn't meant for ChatGPT workspaces with data-residency routing.
 - **GPT's summaries are encrypted for GPT.** If a chat that GPT compacted switches to Claude, Claude gets the messages after the summary and a note that it's unavailable.
 - **Helper agents** whose model family differs from their parent's are untested.
-- **Some request options are refused** with an error instead of being ignored: forced tool choice, output-token caps, non-JSON text formats, and `parallel_tool_calls=false` with tools.
+- **Some request options are refused** with an error instead of being ignored: forced tool choice, output-token caps and non-JSON text formats.
+- **Long chats use your plan quickly.** Each Claude entry has a 1M-token context and compacts at 800k tokens, and every tool step sends the whole context, mostly from the prompt cache. The cache figures above come from subscription use, where Claude Code caches prompts for an hour. To compact sooner, set a smaller `context_window` in a models file (see Models under Configuration).
+- **Claude Code's own setup is not used.** The bridge gives Claude the app's tools and prompt instead of Claude Code's, ignores Claude Code's settings files, and clears `ANTHROPIC_*` variables, so Bedrock, Vertex, `apiKeyHelper` and custom endpoint setups don't apply.
 - **No silent model switches.** If Claude Code's safety classifiers re-run a request on a fallback model, such as Opus 4.8 for Opus 5.5, the bridge stops the turn and says why.
 - **Long browser runs** drop older screenshots from Claude's context in batches (the app keeps them), so Claude takes a fresh screenshot when it needs one.
 
@@ -124,7 +126,7 @@ flowchart LR
     end
     Bridge["<b>Bridge</b><br/>127.0.0.1 on your Mac"]
     OpenAI["<b>OpenAI</b><br/>with the app's own login"]
-    Claude["<b>Claude Code</b><br/>one warm claude -p per chat"]
+    Claude["<b>Claude Code</b><br/>one resumed session per chat"]
     Picker -->|"model request"| Bridge
     Bridge -->|"GPT models"| OpenAI
     Bridge -->|"Claude models"| Claude
@@ -134,7 +136,7 @@ flowchart LR
 
 - **One setting.** Picker mode sets `openai_base_url`, so the app's OpenAI connection goes to the bridge, which adds the Claude models to the app's model list.
 - **GPT requests** go on to OpenAI as the app sends them, with the app's own login, WebSocket connection and compaction. In a chat where Claude also answered, the bridge turns Claude's summaries into text and drops Claude's item ids, which OpenAI can't read.
-- **Claude requests** are answered by the bridge: one headless Claude Code process per chat, with the app's tools offered over MCP.
+- **Claude requests** are answered by the bridge: one headless Claude Code session per chat, resumed each turn, with the app's tools offered over MCP.
 - **Tool calls** go back to the app as ordinary tool calls. The app applies its approvals, runs the tool and returns the result to Claude.
 - **Nothing is patched.** The app bundle isn't modified, and the bridge has no tools of its own. The separate window works the same way through its own model provider, without the OpenAI relay.
 
@@ -144,7 +146,7 @@ Checked October 14, 2026. Stars are GitHub stars on that date.
 
 | Project | How Claude runs | Claude uses the app's browser and computer control | Notes |
 |---|---|---|---|
-| This project | Bridge on the app's model API; one warm `claude -p` per thread; the app's tools over MCP | Yes | Built only for the ChatGPT desktop app. Claude next to GPT in the normal picker with GPT traffic relayed to OpenAI, or a separate window |
+| This project | Bridge on the app's model API; `claude -p` per turn, kept running through its tool calls and resumed between turns; the app's tools over MCP | Yes | Built only for the ChatGPT desktop app. Claude next to GPT in the normal picker with GPT traffic relayed to OpenAI, or a separate window |
 | [yetone/magpie](https://github.com/yetone/magpie) (12.7k stars) | Model gateway for many agents and providers; Claude plan requests run the local `claude` with the client's tools over MCP | Not documented for the desktop app | Adds its models next to GPT in the Codex picker through `openai_base_url`. A menu bar app that also routes Claude Code, Gemini CLI, OpenCode and other agents to any provider |
 | [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex) (33 stars) | Claude Agent SDK behind its own `codex app-server` gateway | No; Claude uses Claude Code's own tools | Released almost daily. Claude next to GPT in the picker, model switching mid-chat, plan mode, `/goal`, side chats, sub-agents, the phone app, SSH servers and Linux |
 | [EthanSK/claude-in-codex](https://github.com/EthanSK/claude-in-codex) (0 stars) | `claude -p` per message with `--resume`; the app's tools over MCP | Computer use tested through Codex CLI; its README says the in-app browser wasn't tested | Installed from a clone |
@@ -158,7 +160,7 @@ Checked October 14, 2026. Stars are GitHub stars on that date.
 <details>
 <summary>Can this get my Claude account banned?</summary>
 
-The bridge runs the official, unmodified Claude Code CLI with your own login, the same as running `claude -p` in a terminal. It never reads, copies or forwards your Claude credentials, and it doesn't offer a Claude login of its own. Anthropic says you can still use `claude -p` and third-party apps with your plan's usage limits ([update of October 7, 2026](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)). For heavy use, switch to an Anthropic API key (see "Claude login or API key" under [Configuration](#configuration)).
+The bridge runs the official, unmodified Claude Code CLI (`claude -p`) with your own login. It never reads, copies or forwards your Claude credentials, and it doesn't offer a Claude login of its own. Anthropic says you can still use `claude -p` and third-party apps with your plan's usage limits ([update of October 7, 2026](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)). For heavy use, switch to an Anthropic API key (see "Claude login or API key" under [Configuration](#configuration)).
 
 </details>
 
@@ -179,7 +181,7 @@ This gives Claude the ChatGPT app's tools and interface: the in-app browser, com
 <details>
 <summary>Why not just ask Claude or Codex to build one?</summary>
 
-You can, and a basic bridge works in an afternoon. The hard part is the long tail that only shows up in daily use: keeping Claude's prompt cache warm (97 to 98% of input from the cache), compaction that doesn't resend the whole chat, Stop and resume without losing tool results, screenshots that push a long chat past the size limit, and GPT chats that keep working after Claude has answered in them. This one has been used daily for over two weeks, and [VERIFICATION.md](VERIFICATION.md) lists each problem found, its fix and the test that covers it.
+You can, and a basic bridge works in an afternoon. The hard part is the long tail that only shows up in daily use: keeping Claude's prompt cache warm (97 to 98% of input from the cache), compaction that doesn't resend the whole chat, Stop and resume without losing tool results, screenshots that push a long chat past the size limit, and GPT chats that keep working after Claude has answered in them. Its separate-window form has been used daily for over two weeks, and [VERIFICATION.md](VERIFICATION.md) lists each problem found, its fix and the test that covers it.
 
 </details>
 
@@ -228,7 +230,7 @@ python3 scripts/setup.py --models ~/my-claude-models.json
 <summary>Claude login or API key</summary>
 
 - By default the bridge runs the unmodified `claude` binary with your normal Claude Code login.
-- It never reads Claude Code's credentials, and it clears inherited `ANTHROPIC_*` and `CLAUDE_*` variables (except `CLAUDE_CONFIG_DIR`) so nothing else changes the account or endpoint.
+- It never reads Claude Code's credentials, and it clears inherited `ANTHROPIC_*` and `CLAUDE_*` variables (except `CLAUDE_CONFIG_DIR`) so nothing else changes the account or endpoint. Bedrock, Vertex and custom endpoint setups therefore don't apply.
 - For heavy use, an Anthropic API key is the better fit: Anthropic's plan limits assume ordinary, individual use of Claude Code. In API key mode Claude Code uses the key instead of your login.
 
 ```sh
@@ -249,7 +251,7 @@ python3 scripts/install.py
 ```
 
 - This turns on the app's built-in `web.run` tool for Claude.
-- The bridge forwards each search to OpenAI's search endpoint (`https://chatgpt.com/backend-api/codex/alpha/search`) with the Claude window's own ChatGPT sign-in: only the `Authorization` and `ChatGPT-Account-Id` headers, to that one URL, with redirects refused.
+- The bridge forwards each search to OpenAI's search endpoint (`https://chatgpt.com/backend-api/codex/alpha/search`) with the Claude window's own ChatGPT sign-in: only the `Authorization`, `ChatGPT-Account-Id` and `originator` headers, to that one URL, with redirects refused.
 - Searches can include conversation context that the app adds. The bridge reads no credential files and logs only status codes and command types.
 
 </details>
@@ -259,8 +261,8 @@ python3 scripts/install.py
 
 | Option | Default | Effect |
 |---|---|---|
-| `--port` | 19480 | Local port of the bridge |
-| `--label` | `io.github.wuchris-ch.claude-for-chatgpt-desktop` | LaunchAgent label |
+| `--port` | 19480 | Local port of the bridge. With picker mode on, turn it off first (`picker.py uninstall`), then on again after the change |
+| `--label` | `io.github.wuchris-ch.claude-for-chatgpt-desktop` | LaunchAgent label. Same rule as `--port` with picker mode on |
 | `--agents-md` | `none` | `codex` links `~/.codex/AGENTS.md` into the Claude profile; `claude` copies `~/.claude/CLAUDE.md` once |
 | `--share-skills` | off | Links `~/.codex/skills` into the Claude profile |
 | `--app` | `/Applications/ChatGPT.app` | The ChatGPT app to open |
@@ -280,17 +282,17 @@ Everything lives in `~/Library/Application Support/Claude for ChatGPT Desktop/`:
 | `codex/` | The Claude window's profile: settings, model catalog, plugins and task history |
 | `user-data/` | The Claude window's browser and app state |
 | `sessions/` | Native session records, system prompts and an encrypted retry cache that expires after 24 hours |
-| `logs/` | Request, model, tool-name and lifecycle metadata, and service errors |
+| `logs/` | Request, model, tool-name and lifecycle metadata, and service errors. An install starts a new log once it passes 20 MB |
 | `launch.json`, `token`, `gateway-key` | Settings from setup, and the local keys between the app and the bridge |
 | `picker.json`, `backups/` | Picker mode's record of what it changed, and the backups it restores |
 
-Claude Code keeps its own session transcripts as usual.
+Claude Code keeps its own transcripts of these chats in `~/.claude/projects/`, in the folder whose name ends in `Claude-for-ChatGPT-Desktop-sessions-empty-workspace`. Uninstalling, even with `--delete-data`, leaves them.
 
 ## Security and privacy
 
-- **Local only.** The bridge listens only on 127.0.0.1, requires a random local key, and refuses requests from browsers.
+- **Local only.** The bridge listens only on 127.0.0.1, requires a random local key, and refuses requests from browsers. The keys are kept in owner-only files, never on a command line. Picker mode makes `config.toml` owner-only while its setting holds the key, and restores the file's mode when turned off.
 - **Separate logins.** Claude Code manages its own login. The app's ChatGPT credentials never reach Claude. In picker mode the bridge passes them, with the rest of each GPT request, only to OpenAI at `chatgpt.com`.
-- **No content in logs.** Logs hold request, model, tool-name and lifecycle metadata. They never contain prompts, tool arguments, tool results, tokens or keys.
+- **No content in logs.** Logs hold request, model, tool-name and lifecycle metadata, plus the last lines of Claude Code's error output when a turn fails. They never contain prompts, tool arguments, tool results, tokens or keys.
 - **One setting changed.** Apart from the one setting picker mode adds, your usual ChatGPT profile in `~/.codex` is only read, to copy its settings and plugins into the separate window's profile.
 
 ## Uninstall
@@ -306,7 +308,7 @@ Or from a clone:
 ```sh
 python3 scripts/picker.py uninstall          # take Claude out of the normal picker
 python3 scripts/uninstall.py                 # also stop and remove the service, keep the Claude profile
-python3 scripts/uninstall.py --delete-data   # also delete the Claude profile, history and logs
+python3 scripts/uninstall.py --delete-data   # also delete the Claude profile, history and logs (not Claude Code's transcripts, see Files)
 ```
 
 A chat where Claude answered may not continue on GPT once the bridge is removed, because OpenAI can't read Claude's items in it. Start a new chat for those.
@@ -327,7 +329,7 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 ## Development
 
 ```sh
-npm test               # 153 tests with stand-ins for Claude Code and OpenAI
+npm test               # 165 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # fifteen short checks with real Claude Code
 ```
 

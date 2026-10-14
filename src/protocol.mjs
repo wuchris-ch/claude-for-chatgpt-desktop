@@ -308,8 +308,10 @@ export function userInput(items, {replay = false, prefix = true} = {}) {
       out.push({type: 'text', text: JSON.stringify({previous_tool_call: x})});
     } else if (x.type === 'compaction') {
       throw new Error('Opaque compaction items require a bridge-owned compaction checkpoint.');
-    } else {
-      throw new Error(`Cannot safely import conversation item ${x.type}.`);
+    } else if (!['tool_search_call', 'tool_search_output'].includes(x.type)) {
+      // Another model's server-side work, such as a GPT web search, is shown
+      // as text. Long values such as generated images are left out.
+      out.push({type: 'text', text: JSON.stringify({previous_item: x}, (k, v) => typeof v === 'string' && v.length > 2000 ? `[${v.length} characters left out]` : v)});
     }
   }
   return out.length ? out : [{type: 'text', text: 'Continue from the current conversation context.'}];
@@ -390,17 +392,24 @@ export function visualizeLine(line) {
   try{if(!fs.statSync(file).isFile())return line;}catch{return line;}
   return `${m[1]}\ue200visualize\ue202${m[2]}\ue201`;
 }
+// Markdown code fences: a block closes only on a line of its own character,
+// at least as long as the one that opened it.
+function fenceAfter(open,line) {
+  if(open){const m=/^\s*(`{3,}|~{3,})\s*$/.exec(line);return m&&m[1][0]===open[0]&&m[1].length>=open.length?null:open;}
+  const m=/^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+  return m&&!(m[1][0]==='`'&&m[2].includes('`'))?m[1]:null;
+}
 // Streams one message's text, holding back only a line that may still turn
 // out to be a visualization reference until it ends.
 export class VisualizeLines {
-  line='';open=true;fence=false;
+  line='';open=true;fence=null;
   push(delta) {
     let out='';
     for(const ch of delta) {
       if(ch==='\n') {
         if(this.open)out+=this.fence?this.line:visualizeLine(this.line);
         out+='\n';
-        if(/^\s*(```|~~~)/.test(this.line))this.fence=!this.fence;
+        this.fence=fenceAfter(this.fence,this.line);
         this.line='';this.open=true;continue;
       }
       this.line+=ch;

@@ -4,23 +4,31 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/wuchris-ch/claude-for-chatgpt-desktop/main/install.sh | bash
 #
-# Run it again to update. Options, after `bash -s --` when piped:
+# Run it again to update; an update keeps the picker or the separate window.
+# Options, after `bash -s --` when piped:
 #   --window     use a separate ChatGPT window for Claude instead of the normal picker
+#   --picker     put Claude in the normal picker (the default for a new install)
 #   --uninstall  take Claude out of the picker and remove the background service
 set -euo pipefail
 
 REPO=https://github.com/wuchris-ch/claude-for-chatgpt-desktop.git
 RUNTIME="${CLAUDE_BRIDGE_RUNTIME:-$HOME/Library/Application Support/Claude for ChatGPT Desktop}"
 APP=/Applications/ChatGPT.app
-MODE=picker
+MODE=""
 for arg in "$@"; do
   case "$arg" in
     --window) MODE=window ;;
+    --picker) MODE=picker ;;
     --uninstall) MODE=uninstall ;;
-    -h|--help) echo "Usage: install.sh [--window | --uninstall]"; exit 0 ;;
-    *) echo "Unknown option $arg. Use --window or --uninstall." >&2; exit 2 ;;
+    -h|--help) echo "Usage: install.sh [--window | --picker | --uninstall]"; exit 0 ;;
+    *) echo "Unknown option $arg. Use --window, --picker or --uninstall." >&2; exit 2 ;;
   esac
 done
+# Without an option, an update keeps a separate-window setup as it is: the
+# window has been opened (its app state exists) and picker mode is off.
+if [ -z "$MODE" ]; then
+  if [ ! -f "$RUNTIME/picker.json" ] && [ -n "$(ls -A "$RUNTIME/user-data" 2>/dev/null)" ]; then MODE=window; else MODE=picker; fi
+fi
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -54,7 +62,8 @@ if [ "$MODE" = uninstall ]; then
     if [ -n "$dir" ] && [ -f "$dir/scripts/uninstall.py" ]; then SRC="$dir"; break; fi
   done
   if [ ! -f "${SRC:-}/scripts/uninstall.py" ]; then
-    # With the runtime folder gone, only the setting is left to remove.
+    # With the runtime folder gone, only the setting and the service are left.
+    removed=""
     config="${CODEX_HOME:-$HOME/.codex}/config.toml"
     if grep -qs '^# Added by claude-for-chatgpt-desktop' "$config"; then
       python3 - "$config" <<'PY'
@@ -71,15 +80,27 @@ for line in lines:
         continue
     skip = False
     kept.append(line)
-with open(path + '.picker-tmp', 'w') as f:
+temporary = path + '.picker-tmp'
+if os.path.exists(temporary):
+    os.unlink(temporary)
+with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as f:
     f.write('\n'.join(kept))
-os.chmod(path + '.picker-tmp', os.stat(path).st_mode & 0o777)
-os.replace(path + '.picker-tmp', path)
+os.chmod(temporary, os.stat(path).st_mode & 0o777)
+os.replace(temporary, path)
 PY
       say "Removed the picker setting from $config. Restart ChatGPT."
-      exit 0
+      removed=1
     fi
-    fail "Nothing to uninstall: no copy of Claude for ChatGPT Desktop was found in $RUNTIME."
+    label=io.github.wuchris-ch.claude-for-chatgpt-desktop
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    if [ -f "$plist" ]; then
+      launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+      rm -f "$plist"
+      say "Removed the background service."
+      removed=1
+    fi
+    [ -n "$removed" ] || fail "Nothing to uninstall: no copy of Claude for ChatGPT Desktop was found in $RUNTIME."
+    exit 0
   fi
   cd "$SRC"
   # Copies from before 0.3.6 remove the service without turning picker mode
@@ -98,7 +119,7 @@ fi
   || fail "Open the ChatGPT app once and sign in, then run this again."
 
 if [ "$(node_major)" -lt 24 ]; then
-  if command -v brew >/dev/null && ask "Node.js 24 or later is needed. Install it with Homebrew now?"; then
+  if command -v brew >/dev/null && ask "Node.js 24 or later is needed. Install or upgrade it with Homebrew now?"; then
     if brew list node >/dev/null 2>&1; then brew upgrade node; else brew install node; fi
     hash -r
   fi

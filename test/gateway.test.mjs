@@ -58,9 +58,9 @@ async function setup(t,{upstream}={}) {
   const post=(body,headers={},raw)=>fetch(base+'/responses?client_version=9',{method:'POST',headers:{...app,'thread-id':'thread-1',...headers},body:raw??JSON.stringify(body)});
   return {bridge,openai,logs,dir,base,post,app};
 }
-function connect(url,headers) {
+function connect(url,headers,options={}) {
   return new Promise((resolve,reject)=>{
-    const ws=new WebSocket(url,{headers});const received=[];let upgrade;
+    const ws=new WebSocket(url,{headers,...options});const received=[];let upgrade;
     ws.on('upgrade',r=>{upgrade=r.headers;});
     ws.on('message',d=>received.push(JSON.parse(d.toString())));
     ws.on('open',()=>resolve({ws,received,headers:upgrade,next:async(type,count=1)=>{for(let i=0;i<400;i++){const hits=received.filter(x=>x.type===type);if(hits.length>=count)return hits.at(-1);await new Promise(r=>setTimeout(r,10));}assert.fail('No '+type+' event');}}));
@@ -200,6 +200,32 @@ test('an interrupt on a Claude WebSocket response ends it as incomplete and the 
  c.ws.close();
 });
 
+test('a Claude WebSocket request the app drops at once leaves no Claude process running',async t=>{
+ const {bridge,app}=await setup(t);
+ for(let i=0;i<5;i++) {
+  const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',app,{perMessageDeflate:false});
+  c.ws.send(JSON.stringify({type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-drop-'+i},input:[user('slow-response','u1')]}));
+  c.ws.terminate();
+ }
+ await new Promise(r=>setTimeout(r,500));
+ for(const session of bridge.sessions.values())assert.ok(!session.child,'a Claude process was left running');
+});
+test('a message sent with the interrupt, in the same packet, starts the next Claude response',async t=>{
+ const {bridge,app}=await setup(t);
+ const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',app,{perMessageDeflate:false});
+ const base={type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-race'}};
+ const first=[user('slow-response','u1')];
+ c.ws.send(JSON.stringify({...base,input:first}));
+ await c.next('response.output_text.delta');
+ const id=(await c.next('response.created')).response.id;
+ c.ws._socket.cork();
+ c.ws.send(JSON.stringify({type:'response.interrupt',response_id:id}));
+ c.ws.send(JSON.stringify({...base,input:[...first,user('also this','u2')]}));
+ process.nextTick(()=>c.ws._socket.uncork());
+ await c.next('response.completed');
+ assert.equal(c.received.some(x=>x.type==='error'),false);
+ c.ws.close();
+});
 test('remote compaction of a Claude thread returns one checkpoint item that GPT can then read',async t=>{
  const {openai,post}=await setup(t);
  const history=[user('remember amber pine 742','u1'),{type:'message',role:'assistant',content:[{type:'output_text',text:'ok'}]}];

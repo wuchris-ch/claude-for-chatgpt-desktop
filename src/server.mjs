@@ -65,7 +65,7 @@ export function pruneToolSets(directory,now=Date.now()) {
 // reads Claude Code's credentials.
 // gatewayKey turns on picker mode, where the app's own OpenAI provider is
 // pointed at /g/<gatewayKey>/backend-api/codex (see gateway.mjs).
-export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000}) {
+export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000,exitGraceMs=15000}) {
   if(!AUTH_MODES.includes(auth?.mode))throw new Error(`Unknown auth mode ${auth?.mode}. Use one of: ${AUTH_MODES.join(', ')}.`);
   if(auth.mode==='api_key'&&typeof auth.apiKey!=='function')throw new Error('API key mode needs an apiKey function.');
   fs.mkdirSync(stateDir,{recursive:true,mode:0o700});
@@ -76,7 +76,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   const cacheTimer=setInterval(()=>{try{pruneResponseCache(cacheDir);pruneToolSets(toolSetDir);}catch(error){log('cache_cleanup_error',{message:error.message});}},900000);cacheTimer.unref();
   // resolvedModels maps a catalog slug to the model Claude Code last started
   // for it, so later processes pin aliases to the same version.
-  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
+  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,exitGraceMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
   // startedModels keeps the same record across restarts, for the names the
   // picker shows only. Pinning starts empty, so an alias still follows Claude
   // Code to a new release after a restart.
@@ -211,11 +211,20 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
       else if(!res.writableEnded){res.write(`event: error\ndata: ${JSON.stringify({type:'error',message:error.message})}\n\n`);res.end();}
     }
   });
+  // An error here, before any key is checked, would end the whole bridge.
   server.on('upgrade',(req,socket,head)=>{
-    const url=new URL(req.url,bridge.url);
-    const sub=gateway&&!req.headers.origin?gatewayPath(url.pathname,gatewayKey):null;
-    if(sub===null){socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
-    gateway.handleUpgrade(req,socket,head,sub,url);
+    try {
+      const url=new URL(req.url,bridge.url);
+      // The app can try a WebSocket on the window provider first. A missing
+      // route makes it fall back to HTTP; a refusal would read as a login error.
+      if(!url.pathname.startsWith('/g/')){socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
+      const sub=gateway&&!req.headers.origin?gatewayPath(url.pathname,gatewayKey):null;
+      if(sub===null){socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
+      gateway.handleUpgrade(req,socket,head,sub,url);
+    } catch(error) {
+      log('upgrade_error',{message:error.message});
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    }
   });
   server.requestTimeout=0;server.timeout=0;
   // Node closes an idle keep-alive socket after 5 s plus a 1 s buffer. Claude

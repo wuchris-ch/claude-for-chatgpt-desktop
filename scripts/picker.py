@@ -40,8 +40,18 @@ def sha(data):
 
 
 def root_end(text):
-    first = re.search(r'^[ \t]*\[', text, re.M)
-    return first.start() if first else len(text)
+    """Offset of the first table header, skipping lines inside multi-line strings."""
+    offset, inside = 0, None
+    for line in text.splitlines(keepends=True):
+        if inside is None and re.match(r'[ \t]*\[', line):
+            return offset
+        for quote in re.findall(r'"""|\'\'\'', line):
+            if inside is None:
+                inside = quote
+            elif quote == inside:
+                inside = None
+        offset += len(line)
+    return len(text)
 
 
 def add_setting(text, url):
@@ -60,31 +70,44 @@ def add_setting(text, url):
 
 
 def remove_setting(text):
-    """Remove the marked line and the setting after it, keeping everything else."""
+    """Remove the marked line and the setting after it, keeping everything else.
+
+    add_setting puts one blank line between the setting and a table that
+    follows it, so that line goes too.
+    """
     lines = text.split('\n')
-    kept, skip = [], False
-    for line in lines:
+    kept, skip, removed = [], False, None
+    for i, line in enumerate(lines):
         if line == MARK:
             skip = True
             continue
         if skip and KEY_LINE.match(line) and '/g/' in line and '127.0.0.1' in line:
-            skip = False
+            skip, removed = False, i
             continue
         skip = False
+        if removed == i-1 and line == '' and i+1 < len(lines) and lines[i+1].lstrip().startswith('['):
+            continue
         kept.append(line)
     return '\n'.join(kept)
 
 
-def write_atomic(path, data, mode=None):
+def write_atomic(path, data, mode=None, private=False):
     # A config.toml kept in a dotfiles repository is often a symlink. Writing
     # its target keeps the link.
     path = pathlib.Path(os.path.realpath(path))
     temporary = path.with_name(path.name+'.picker-tmp')
-    temporary.write_bytes(data)
+    temporary.unlink(missing_ok=True)
+    # Created owner-only, so the content is never readable by others.
+    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as handle:
+        handle.write(data)
     if path.exists():
         shutil.copymode(path, temporary)
     elif mode is not None:
         temporary.chmod(mode)
+    # The gateway key in the setting lets anyone who reads it use the
+    # owner's Claude login through the bridge.
+    if private:
+        temporary.chmod(temporary.stat().st_mode & 0o700)
     temporary.replace(path)
 
 
@@ -115,10 +138,18 @@ def install(codex, runtime, service=True):
     port = launch.get('port', DEFAULT_PORT)
     key_file = runtime/'gateway-key'
     if not key_file.exists():
-        key_file.write_text(secrets.token_urlsafe(32))
-        key_file.chmod(0o600)
+        with os.fdopen(os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as handle:
+            handle.write(secrets.token_urlsafe(32))
     key = key_file.read_text().strip()
     original = config_file.read_bytes() if config_file.exists() else b''
+    mode = os.stat(os.path.realpath(config_file)).st_mode & 0o777 if config_file.exists() else None
+    # A setting left by an earlier copy whose runtime folder is gone points at
+    # a key that no longer exists. Replace it, and keep it out of the backup.
+    if still_set(original.decode()):
+        cleaned = remove_setting(original.decode())
+        cleaned = '\n'.join(line for line in cleaned.split('\n') if not (KEY_LINE.match(line) and '/g/' in line and '127.0.0.1' in line))
+        original = cleaned.encode()
+        print('Replacing the picker setting left by an earlier installation.')
     updated = add_setting(original.decode(), gateway_url(port, key)).encode()
     # The bridge must serve picker mode before the app is pointed at it.
     if service:
@@ -129,16 +160,20 @@ def install(codex, runtime, service=True):
             time.sleep(.1)
         else:
             raise SystemExit('The bridge did not start in picker mode. Nothing in your ChatGPT profile was changed.')
-    backup = runtime/'backups'/datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    backup, n = runtime/'backups'/stamp, 1
+    while backup.exists():
+        n += 1
+        backup = runtime/'backups'/f'{stamp}-{n}'
     backup.mkdir(parents=True, mode=0o700)
     (backup/'config.toml').write_bytes(original)
     (backup/'config.toml').chmod(0o600)
     if cache_file.exists():
         shutil.copy2(cache_file, backup/'models_cache.json')
         (backup/'models_cache.json').chmod(0o600)
-    write_atomic(config_file, updated, 0o600)
+    write_atomic(config_file, updated, 0o600, private=True)
     state = {'codex_home': str(codex), 'backup': str(backup), 'config_existed': bool(original) or config_file.exists(),
-             'config_sha_before': sha(original), 'config_sha_after': sha(updated), 'port': port,
+             'config_sha_before': sha(original), 'config_sha_after': sha(updated), 'config_mode': mode, 'port': port,
              'installed_at': datetime.datetime.now().isoformat(timespec='seconds')}
     write_atomic(state_file, json.dumps(state, indent=2).encode(), 0o600)
     print('Picker mode is on. Changed', config_file, '(one setting, openai_base_url).')
@@ -188,6 +223,8 @@ def uninstall(codex, runtime):
     else:
         remove_or_explain(config_file, current.decode())
         how = 'removed the openai_base_url setting and kept your later edits'
+    if state.get('config_mode') is not None and config_file.exists():
+        os.chmod(os.path.realpath(config_file), state['config_mode'])
     if (backup/'models_cache.json').exists():
         shutil.copy2(backup/'models_cache.json', cache_file)
     elif cache_file.exists():
