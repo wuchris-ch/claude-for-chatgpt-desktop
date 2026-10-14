@@ -135,16 +135,18 @@ flowchart LR
 
 ## Compared with similar projects
 
-Checked October 4, 2026. Stars are GitHub stars on that date.
+Checked October 14, 2026. Stars are GitHub stars on that date.
 
 | Project | How Claude runs | Claude uses the app's browser and computer control | Notes |
 |---|---|---|---|
-| This project | Bridge on the app's model API; one warm `claude -p` per thread; the app's tools over MCP | Yes | Claude next to GPT in the normal picker with GPT traffic relayed to OpenAI, or a separate window |
-| [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex) (26 stars) | Claude Agent SDK in front of `codex app-server` | No evidence found; Claude uses Claude Code's own tools | Claude next to GPT in the picker, model switching mid-chat, the phone app, a curl installer, Stop, steering, compaction, side chats, plan mode |
-| [EthanSK/claude-in-codex](https://github.com/EthanSK/claude-in-codex) (0 stars) | `claude -p` per message with `--resume`; the app's tools over MCP | Untested: its README reports testing through Codex CLI | |
+| This project | Bridge on the app's model API; one warm `claude -p` per thread; the app's tools over MCP | Yes | Built only for the ChatGPT desktop app. Claude next to GPT in the normal picker with GPT traffic relayed to OpenAI, or a separate window |
+| [yetone/magpie](https://github.com/yetone/magpie) (12.7k stars) | Model gateway for many agents and providers; Claude plan requests run the local `claude` with the client's tools over MCP | Not documented for the desktop app | Adds its models next to GPT in the Codex picker through `openai_base_url`. A menu bar app that also routes Claude Code, Gemini CLI, OpenCode and other agents to any provider |
+| [gkorepanov/ccodex](https://github.com/gkorepanov/ccodex) (33 stars) | Claude Agent SDK behind its own `codex app-server` gateway | No; Claude uses Claude Code's own tools | Released almost daily. Claude next to GPT in the picker, model switching mid-chat, plan mode, `/goal`, side chats, sub-agents, the phone app, SSH servers and Linux |
+| [EthanSK/claude-in-codex](https://github.com/EthanSK/claude-in-codex) (0 stars) | `claude -p` per message with `--resume`; the app's tools over MCP | Computer use tested through Codex CLI; its README says the in-app browser wasn't tested | Installed from a clone |
+| [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) (3 stars) | Claude Agent SDK as a model provider | Not documented | No images or compaction for Claude; no updates since September 14 |
 | [wbopan/claude-in-codex](https://github.com/wbopan/claude-in-codex) (0 stars) | Menu bar app that hooks the app's internals through the Node inspector | Not documented | Notarized DMG; app version 26.924 disabled the hook |
-| [Reidond/codex-claude-models-plugin](https://github.com/Reidond/codex-claude-models-plugin) (0 stars) | Claude Agent SDK as a model provider | Not documented | No images or compaction for Claude |
-| [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) (16.9k stars), [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (54k stars) | General model proxies | Only through raw OAuth tokens or an API key | With raw Claude OAuth tokens: Anthropic blocked third-party use on January 9, 2026 and has billed it as extra usage since April 4, 2026. Their `claude` CLI mode is stateless and has no tools |
+| [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) (17.4k stars), [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (55.2k stars) | General model proxies | Only through raw OAuth tokens or an API key | With raw Claude OAuth tokens: Anthropic blocked third-party use on January 9, 2026 and has billed it as extra usage since April 4, 2026. Their `claude` CLI mode is stateless and has no tools |
+
 
 ## FAQ
 
