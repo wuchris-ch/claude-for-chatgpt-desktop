@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
+import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userTurn, timeNote, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 
@@ -103,7 +103,7 @@ export class Session {
     const child=this.child;
     if(child){this.cancel(reason);await this.exiting;}
     this.pending.clear();this.results.clear();this.nativeCalls=[];this.resumeItems=null;
-    this.record={claudeId:randomUUID(),seen:[],started:false,recoveredFrom:this.record.claudeId};this.save();
+    this.record={claudeId:randomUUID(),seen:[],started:false,recoveredFrom:this.record.claudeId,lastReplyAt:this.record.lastReplyAt};this.save();
   }
   // A stopped turn leaves a consistent native transcript. Claude Code keeps the
   // partial answer and marks unanswered tool calls as interrupted, even after
@@ -112,7 +112,7 @@ export class Session {
   async resumeOrRecover(body) {
     const stop=!body.__bridge_compaction&&this.record.stop;
     this.resumeItems=stop?afterStop(body.input,this.record.history,stop.seen,this.record.delivered):null;
-    if(this.resumeItems)this.log('stopped_turn_resumed',{reason:stop.reason,items:this.resumeItems.length});
+    if(this.resumeItems)this.log('stopped_turn_resumed',{reason:stop.reason,items:this.resumeItems.length,steer:resampledSteer(this.resumeItems,stop.reason)});
     else await this.reset('interrupted_turn_recovery');
   }
   // When agent or user messages arrive while a response streams, the desktop
@@ -184,7 +184,7 @@ export class Session {
     // The record was last saved when the session's turn ended or was stopped. A
     // turn stopped just now last used the cache at its latest response.
     const cold=Date.now()-(used??fs.statSync(path.join(this.bridge.stateDir,`${id}.json`)).mtimeMs)>CACHE_TTL_MS;
-    return {from:id.slice(0,12),claudeId:record.claudeId,model,effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold,stopped:record.inflight?record.stop.reason:null};
+    return {from:id.slice(0,12),claudeId:record.claudeId,model,effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold,stopped:record.inflight?record.stop:null};
   }
   // After a compaction in the middle of a turn, the desktop continues in a new
   // context window and never answers the old session's pending tool call, so
@@ -281,7 +281,7 @@ export class Session {
     this.turnKey=body.__bridge_turn_key;
     let fork=body.__bridge_compaction&&!this.record.started&&body.__bridge_turn_key?await this.compactionFork(originalInput,body.__bridge_turn_key):null;
     if(fork?.reason){this.log('compaction_import',{reason:fork.reason});fork=null;}
-    if(fork){this.tools=fork.tools;this.log('compaction_fork',{from:fork.from,extra_items:fork.extra.length,cold:fork.cold,stopped:fork.stopped});}
+    if(fork){this.tools=fork.tools;this.log('compaction_fork',{from:fork.from,extra_items:fork.extra.length,cold:fork.cold,stopped:fork.stopped?.reason??null});}
     await this.setupMcp();
     const users=body.input.filter(isIncoming);
     const key=inputKey;
@@ -301,6 +301,9 @@ export class Session {
       input=[...userInput(body.input,{replay}),...(replay?replayImageNote(body.input):[])];
       if(replay)this.log('history_import',{reason:'new_or_compacted_context'});
     }
+    // A message the desktop resent mid-response is a mid-turn message, which gets no time note.
+    const steered=!fork&&this.resumeItems&&resampledSteer(this.resumeItems,this.record.stop?.reason);
+    if(!body.__bridge_compaction&&!steered&&userTurn(body.input))input=[...input,timeNote(Date.now(),this.record.lastReplyAt)];
     this.pendingSeen=[...new Set([...this.record.seen,...users.map(key)])];
     // A fork keeps the session's model and effort: changing either misses the cache.
     const runModel=fork?.model??model;
@@ -494,7 +497,7 @@ export class Session {
     this.record.history=historyStamp([...this.streamInput,...this.stream.output]);
     const calls=this.stream.output.filter(x=>['function_call','custom_tool_call'].includes(x.type));
     this.record.historyWithoutCalls=calls.length?historyStamp([...this.streamInput,...this.stream.output.filter(x=>!calls.includes(x))]):null;
-    this.save();
+    this.record.lastReplyAt=Date.now();this.save();
     this.usage.total_tokens=this.usage.input_tokens+this.usage.output_tokens;this.stream?.complete(this.usage);
     this.releaseResponse();
   }
@@ -517,7 +520,7 @@ export class Session {
     // What the stopped session saw, so a resume sends only the rest.
     if(this.child&&this.ready&&!this.stopping&&this.record.inflight) {
       const sent=this.nativeCalls.filter(c=>c.emitted&&!this.record.delivered?.includes(c.id)).length;
-      this.record.stop={reason,seen:this.pendingSeen,sent};this.save();
+      this.record.stop={reason,seen:this.pendingSeen,sent};if(this.stream)this.record.lastReplyAt=Date.now();this.save();
     }
     this.stream?.end();this.releaseResponse();this.stopChild('SIGINT');
   }

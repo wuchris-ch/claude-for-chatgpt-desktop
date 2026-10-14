@@ -2,7 +2,62 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge. The newest checks come first.
+
+## Release 0.3.5, checked October 14, 2026
+
+Version 0.3.5 brings seven fixes made in the separate-window bridge after 0.3.4, versions 0.2.31, 0.2.32 and 0.2.34 to 0.2.38 there. Three follow from the ChatGPT desktop update of October 8, 2026. For each fix, a fixture test or a live check fails on 0.3.4.
+
+### Messages sent while a response streams
+
+Since the October 8 update, a message sent while a response is still streaming, before it has produced a tool call, makes the app cancel the response and send the request again with the message appended. A Stop differs: the app adds a `<turn_aborted>` developer note to the next request. The bridge treated both as a Stop, so Claude answered the message and waited for a go. In the separate-window bridge's log from October 9 to 11, 44 of 48 such resumes carried only the message. Now a cancelled response followed by a user message without `<turn_aborted>` resumes as a mid-turn message: Claude answers it in a line and carries on, and no time note is added. In picker mode the app's WebSocket interrupt stops the response the same way as an HTTP disconnect, so the same check applies.
+
+### Inline visualizations
+
+The app's visualize skill draws a visual from a `visualize{"path":"…"}` line wrapped in the private-use characters U+E200, U+E202 and U+E201. Claude models drop those characters, even when asked to copy them, so the app showed the bare line as text. The bridge now adds them as the text streams, to a line that is exactly such a reference to an absolute path of an `.html` file that exists. Lines in code blocks stay as written, and checkpoints are not rewritten.
+
+### Turns paused by the host
+
+Claude Code marks a stopped turn's unanswered tool calls as rejected by the user and the turn as interrupted by the user. When the app compacted in the middle of a turn, Claude took the marks at their word: in the separate-window bridge, 4 of 4 checkpoints said the user had rejected the calls, and each next window waited for the user. The fork is now told that the user did nothing, that output which follows is the call's normal result, and that the checkpoint should record the task as still in progress. A bridge restart that cuts off a turn the user had already stopped keeps the stopped wording.
+
+### Tool calls the app never answers
+
+A thread that is archived, deleted or left after a Stop while the app runs a tool never sends the tool's result. Claude Code waited on it until the bridge restarted, the session counted as active, and `install.py` refused every update while that process ran. In the separate-window bridge this happened three times from October 1 to 12, for up to 24 hours, while the slowest of 28,722 answered tool calls took 45 minutes. A session that has waited two hours for a tool result, with no request in progress, is now stopped and logs `host_tool_abandoned`. A result that arrives later resumes it.
+
+### Time of day
+
+Claude Code gives Claude the date but not the time. Asked about a pull request 8 minutes after its last reply, Opus described what had happened "since yesterday". Each new turn that brings a user message now carries the local time and how long ago Claude last replied. Mid-turn messages and compaction requests get none. In picker mode the gap counts from Claude's last reply.
+
+### Base prompt rename
+
+Since October 9, 2026 the app sends its base prompt as a leading developer message with empty `instructions`. The rename of "As Codex, you are" to "You are" applied only to `instructions`, so it stopped working. It now covers every part of the app's prompt, and empty parts are left out.
+
+### Automated tests in 0.3.5
+
+148 tests pass: 120 Node tests and 28 Python tests. New or changed in 0.3.5:
+
+- A response cancelled before its tool call, then sent again with a user message, resumes as a mid-turn message, and a resume with `<turn_aborted>` keeps the stopped wording.
+- A bare visualization reference gets the markers, also when split across stream chunks, and a reference in a code block, to a missing file or to a relative path stays as written.
+- A compaction of a turn the host paused says the user did nothing and which interrupted calls ran.
+- A tool call left unanswered past the wait limit stops the session, a wait just under the limit does not, and a late result resumes it.
+- A new turn carries the time and the gap since Claude's last reply, and a mid-turn message does not.
+- The base prompt arriving as a developer message with empty `instructions` is renamed.
+
+### Live checks in 0.3.5
+
+`node e2e/live.mjs` has four new checks: `time`, `resample`, `visualize` and `toolwait`. The mid-turn compaction check now also fails when the checkpoint blames the user. With Claude Code 2.1.300 all fifteen checks pass. Run against the 0.3.4 source, four failed. The mid-response message resumed as a stopped turn, and Claude answered without calling the next job. The visualization reference came out without the markers. The mid-turn checkpoint blamed the user for the pause. Asked for the local time, Sonnet wrote a `date` tool call as text instead of answering.
+
+`install.sh` from this release was run with a temporary runtime folder, port and service label, and a temporary ChatGPT profile signed in with a real ChatGPT login. The app's own runtime (ChatGPT 26.1007.71326, Codex runtime 0.162.0-alpha.17.2) then ran these checks:
+
+| Check | Result |
+|---|---|
+| Claude Sonnet with a shell tool | Answered 323 |
+| GPT (`gpt-6-luna`) through the relay | Answered 667 |
+| Claude Haiku continuing GPT's thread | Ran the next command and answered "667 668" |
+| GPT after Claude | Read Haiku's turn and answered "667 668" |
+| Message sent through the app server 1.6 seconds into Opus's first response | Delivered as a mid-turn message; Opus answered it in a line and ran all three steps |
+
+`--uninstall` restored the temporary `config.toml` byte for byte and removed the service.
 
 ## Release 0.3.4, checked October 9, 2026
 

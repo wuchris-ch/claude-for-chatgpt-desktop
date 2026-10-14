@@ -181,12 +181,22 @@ test('a new user message can abandon a tool cycle that has no result',async t=>{
  assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.items===1));
  assert.equal(logs.filter(x=>x.event==='tool_call').length,1);
 });
+test('a message the desktop resends after cancelling a streaming response reaches the session as a mid-turn message',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('slow-response');
+ await stopWhileStreaming(post,first,logs);
+ const report=resumed(output(await(await post({...first,input:[...first.input,...request('keep both?','user2').input]})).text()));
+ assert.match(report.request,/turn_stopped>The desktop restarted your response to deliver the message below.*The user did not stop you.*keep both\?.*The user sent this while you were working/);
+ assert.doesNotMatch(report.request,/stopped before it finished|current_time|slow-response/);
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.steer===true));
+});
 test('Stop during a response resumes the native session with only what came after',async t=>{
  const {post,logs,dir}=await setup(t);const first=request('slow-response');
  await stopWhileStreaming(post,first,logs);
  const note={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The user interrupted the previous turn.</turn_aborted>'}]};
  const report=resumed(output(await(await post({...first,input:[...first.input,note,...request('continue after stop','user2').input]})).text()));
  assert.match(report.request,/turn_stopped.*stopped before it finished.*developer_message.*turn_aborted.*continue after stop/);
+ assert.match(report.request,/continue after stop.*current_time>It is .*Your last reply ended less than a minute ago\./);
  assert.doesNotMatch(report.request,/slow-response|Continue the task|reached the host/);
  assert.equal(report.resume,record(dir,logs).claudeId);
  assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.items===2));
@@ -233,6 +243,17 @@ test('a user message sent during a tool cycle reaches Claude with the result and
  assert.match(final,/RESULT/);assert.match(final,/STEERED.*btw use the other worker.*Before your next tool call/);
  assert.equal(fs.readFileSync(path.join(dir,'fake-starts'),'utf8').trim().split('\n').length,1);
  assert.ok(logs.some(x=>x.event==='user_steering'));
+});
+test('a new turn tells Claude the time and how long ago it last replied; a mid-turn message does not',async t=>{
+ const {post}=await setup(t);const first=request('echo-input first');
+ const a=output(await(await post(first)).text());const said=JSON.stringify(a);
+ assert.match(said,/current_time>It is [A-Z][a-z]+day, [A-Z][a-z]+ \d+, \d{4} at \d+:\d\d [AP]M [A-Z]+\. Use this to judge/);assert.doesNotMatch(said,/Your last reply/);
+ const b=JSON.stringify(output(await(await post({...first,input:[...first.input,...a,...request('echo-input second','user2').input]})).text()));
+ assert.match(b,/echo-input second.*Your last reply ended less than a minute ago\./);
+ const other=(await setup(t)).post;const steer=request('invoke-tool');
+ const call=output(await(await other(steer)).text())[0];
+ const final=JSON.stringify(output(await(await other({...steer,input:[...steer.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'completed once'},...request('btw use the other worker','user2').input]})).text()));
+ assert.match(final,/STEERED.*btw use the other worker/);assert.doesNotMatch(final,/current_time/);
 });
 test('a mid-turn message that Claude Code queues late still reaches Claude before the tool result',async t=>{
  const {post,logs}=await setup(t);const first=request('invoke-tool');
@@ -281,6 +302,19 @@ test('a clock.sleep answered in time is not stopped',async t=>{
  assert.match(final,/SLEPT/);
  await new Promise(r=>setTimeout(r,400));
  assert.equal(logs.some(x=>x.event==='host_sleep_abandoned'),false);
+});
+test('a tool call the desktop never answers is stopped after the wait limit and a late result resumes the session',async t=>{
+ const {post,logs,dir,b}=await setup(t);const first=request('invoke-tool');
+ const call=output(await(await post(first)).text())[0];
+ await evictIdleSessions(b,Date.now()+7199000);
+ assert.equal(logs.some(x=>x.event==='host_tool_abandoned'),false);assert.ok([...b.sessions.values()][0].child);
+ await evictIdleSessions(b,Date.now()+7200001);
+ assert.ok(logs.some(x=>x.event==='host_tool_abandoned'));assert.ok(logs.some(x=>x.event==='claude_exit'));
+ assert.equal(logs.some(x=>x.event==='error'),false);
+ const report=resumed(output(await(await post({...first,input:[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'ran late: 99'}]})).text()));
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.match(report.request,/stopped before it finished.*output the host recorded follows.*ran late: 99/);
+ assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.reason==='The desktop never returned a tool result.'&&x.items===1));
 });
 test('a question card the desktop would not draw is refused with the reason, and a valid card reaches the desktop',async t=>{
  const {post,logs}=await setup(t);
@@ -379,7 +413,7 @@ test('a compaction during a tool cycle stops the waiting turn and forks it from 
  const turn=logs.find(x=>x.event==='cancel'&&x.reason==='compacted_mid_turn').session;
  assert.ok(logs.findIndex(x=>x.event==='claude_exit'&&x.session===turn)<logs.findIndex(x=>x.event==='compaction_fork'));
  assert.equal(report.fork,true);assert.equal(report.effort,'high');assert.equal(report.caching,'on');assert.equal(report.resume,record(dir,logs).claudeId);
- assert.match(report.request,/turn_stopped>Your turn was paused here so the host could compact the conversation\. A tool call shown as rejected or interrupted ran in the host if output for it follows\..*host-ran-this.*compaction_request/);
+ assert.match(report.request,/turn_stopped>The host paused your turn here to compact the conversation\. The user did not reject, stop or interrupt anything\..*The host ran each tool call whose output follows.*host-ran-this.*compaction_request/);
  assert.doesNotMatch(report.request,/invoke-tool/);
  assert.ok(logs.some(x=>x.event==='compaction_fork'&&x.stopped==='compacted_mid_turn'&&x.cold===false&&x.extra_items===1));
  assert.equal(logs.some(x=>['history_import','compaction_import','error'].includes(x.event)),false);

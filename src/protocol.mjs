@@ -1,4 +1,6 @@
 import {createHash, randomUUID, randomBytes, createCipheriv, createDecipheriv} from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 // Ids of items the bridge creates carry a mark that OpenAI's hex ids never
@@ -185,17 +187,42 @@ export function afterStop(input, stamp, seen = [], delivered = []) {
   return input.slice(historyEnd(input, stamp)).filter(x =>
     isIncoming(x) ? !seen.includes(inputKey(x)) : isResult(x) ? !delivered.includes(x.call_id) : isDeveloper(x));
 }
+// Claude Code marks a stopped turn's unanswered tool calls as rejected by the
+// user and the turn as interrupted by the user. When the host or a restart
+// stopped it, Opus took the marks at their word: 4 of 4 checkpoints of a turn
+// paused for compaction said the user had rejected the calls, and each next
+// window waited for the user instead of carrying on.
+const STOP_MARKS='The user did not reject, stop or interrupt anything. Claude Code wrote the "The user doesn\'t want to proceed" tool results, "[Request interrupted by user for tool use]" and any "No response requested." reply because of this, not because of anything the user did.';
+// The desktop notes a Stop as <turn_aborted>. A restart can cut off a turn the
+// user had already stopped, and then the user did stop it.
+const userStopped = items => items.some(x => isDeveloper(x) && contentBlocks(x.content).some(c => c.text?.includes('<turn_aborted')));
+const hostStopped = (items, reason) => reason === 'compacted_mid_turn' || reason === 'Bridge shutting down.' && !userStopped(items);
 // A compaction that forks a stopped turn sees the same marks. Without a note,
 // the checkpoint could record calls the host ran as never run.
-export function stoppedTurnNote(items, reason) {
-  if (!items.some(isResult)) return [];
-  const why = reason === 'compacted_mid_turn' ? 'Your turn was paused here so the host could compact the conversation.' : 'Your turn was stopped before it finished.';
-  return [{type: 'text', text: `<turn_stopped>${why} A tool call shown as rejected or interrupted ran in the host if output for it follows.</turn_stopped>`}];
+export function stoppedTurnNote(items, {reason, sent = 0}) {
+  const ran = items.filter(isResult).length;
+  if (!hostStopped(items, reason))
+    return ran ? [{type: 'text', text: '<turn_stopped>Your turn was stopped before it finished. A tool call shown as rejected or interrupted ran in the host if output for it follows.</turn_stopped>'}] : [];
+  const parts = [reason === 'compacted_mid_turn' ? 'The host paused your turn here to compact the conversation.' : 'Your turn was cut off here by a bridge restart.', STOP_MARKS];
+  if (ran) parts.push('The host ran each tool call whose output follows, so that output is the call\'s normal result.');
+  if (ran < sent) parts.push('A call shown as rejected with no output here may have run in part or in full, so the checkpoint should say to check its effects before relying on it or running it again.');
+  parts.push('The checkpoint should leave out the pause and these marks, and record the task as still in progress, continuing from here.');
+  return [{type: 'text', text: `<turn_stopped>${parts.join(' ')}</turn_stopped>`}];
 }
-// Claude Code marks a stopped turn's unanswered tool calls as rejected by the
-// user, which is not always what happened in the host.
+// A message sent while a response streams makes the desktop cancel the
+// response and sample again with the message appended, a mid-turn message with
+// no <turn_aborted> note. Told the turn was stopped, Opus answered the message
+// and waited for a go: 44 of 48 such resumes from October 9 to 11, 2026 carried
+// only the message.
+export const resampledSteer = (items, reason) => reason === 'Desktop cancelled or disconnected.' && items.some(isIncoming) && !items.some(isResult) && !userStopped(items);
 export function resumeAfterStop(items, {reason, sent = 0}) {
-  const parts = [reason === 'Bridge shutting down.' ? 'Your previous turn was cut off by a bridge restart, not stopped by the user.' : 'Your previous turn was stopped before it finished.'];
+  if (resampledSteer(items, reason)) {
+    const parts = ['The desktop restarted your response to deliver the message below, which the user sent while you were working. The user did not stop you: Claude Code marked the response as interrupted by the user because of this restart.'];
+    if (sent) parts.push('A tool call shown as rejected had already reached the host, which may have run it in part or in full. Check its effects before relying on it or running it again.');
+    parts.push('Carry on with the task, taking the message into account.');
+    return [{type: 'text', text: `<turn_stopped>${parts.join(' ')}</turn_stopped>`}, ...steeringPrompt(items)];
+  }
+  const parts = [hostStopped(items, reason) ? 'Your previous turn was cut off by a bridge restart. '+STOP_MARKS : 'Your previous turn was stopped before it finished.'];
   if (items.some(isResult)) parts.push('A tool call shown as rejected or interrupted may still have run in the host. The output the host recorded follows.');
   else if (sent) parts.push('A tool call shown as rejected had already reached the host, which may have run it in part or in full. Check its effects before relying on it or running it again.');
   if (!items.some(isIncoming)) parts.push('Continue the task from where it stopped.');
@@ -241,10 +268,15 @@ export function systemPrompt(body, {name, webSearch = false}) {
     ? 'Web search is available inside exec as tools.web__run, the host standalone OpenAI search service; its exec documentation lists the commands (search_query, open, find and others). There is no top-level web_run tool. '
     : 'Web search is the web_run tool, the host standalone OpenAI search service.';
   const tools=exec?search+'The exec tool accepts JavaScript in its input property.'+execOnlyNote(exec):search;
-  // The desktop's base prompt is written for Codex with only its first line renamed.
-  const instructions=(body.instructions ?? '').replace('As Codex, you are','You are');
-  return [instructions, ...developers.map(x => contentBlocks(x.content).map(x => x.text).join('\n')),
-    [`You are ${name}, the main assistant. The chatgpt MCP tools are the tools of the host desktop runtime. Use their native schemas. The host executes them and applies its permissions.`, tools, 'image_gen is not available to Claude.', CWD_NOTE, HOST_POLICY_NOTE, TOOL_HABITS_NOTE, COMMON_NOTE, DEVELOPER_NOTE].filter(Boolean).join(' ')].join('\n\n');
+  // The desktop's base prompt is written for Codex. Its first line names the
+  // selected model, but its personality section opens "As Codex, you are".
+  // Since October 9, 2026 the desktop sends the base prompt as a leading
+  // developer message with empty instructions, which the rename had missed,
+  // so it covers every part and empty parts are left out.
+  const desktop = [body.instructions ?? '', ...developers.map(x => contentBlocks(x.content).map(x => x.text).join('\n'))]
+    .filter(x => x.trim()).join('\n\n').replaceAll('As Codex, you are', 'You are');
+  return [desktop,
+    [`You are ${name}, the main assistant. The chatgpt MCP tools are the tools of the host desktop runtime. Use their native schemas. The host executes them and applies its permissions.`, tools, 'image_gen is not available to Claude.', CWD_NOTE, HOST_POLICY_NOTE, TOOL_HABITS_NOTE, COMMON_NOTE, DEVELOPER_NOTE].filter(Boolean).join(' ')].filter(Boolean).join('\n\n');
 }
 
 // Given the whole input (prefix), the leading developer messages are the
@@ -283,9 +315,11 @@ export function userInput(items, {replay = false, prefix = true} = {}) {
 const isImageContent = c => c.type === 'input_image' || c.type === 'image';
 const imagesIn = items => items.reduce((n, x) => n + (x.type === 'message' && Array.isArray(x.content) ? x.content.filter(isImageContent).length
   : isResult(x) && Array.isArray(x.output) ? x.output.filter(isImageContent).length : 0), 0);
+const isUser = x => x.type === 'message' && x.role === 'user';
+// The user messages after the last reply, tool call or result.
+const trailingUserMessages = items => items.slice(items.findLastIndex(x => !isUser(x) && !isDeveloper(x)) + 1).filter(isUser);
 export function replayImageNote(items) {
-  const last = items.findLastIndex(x => !(x.type === 'message' && x.role === 'user') && !isDeveloper(x));
-  const attached = imagesIn(items.slice(last + 1).filter(x => x.type === 'message' && x.role === 'user'));
+  const attached = imagesIn(trailingUserMessages(items));
   const earlier = imagesIn(items) - attached;
   if (!earlier) return [];
   const origin = attached
@@ -313,10 +347,68 @@ export function steeringPrompt(items) {
   return items.some(x => x.type === 'message' && x.role === 'user') ? [...content, {type: 'text', text: STEERING_NOTE}] : content;
 }
 
+// Claude Code tells Opus the date, and again when it changes, but never the
+// time. Asked about a PR 8 minutes after its last reply, Opus answered with
+// what had happened "since yesterday". A new turn that brings a user message
+// carries the local time and how long ago Opus last replied. A mid-turn
+// message arrives while Opus is still working, so it gets neither.
+export const userTurn = items => trailingUserMessages(items).length > 0;
+export function elapsed(ms) {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return 'less than a minute';
+  if (minutes < 120) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `about ${hours} hours` : `about ${Math.round(hours / 24)} days`;
+}
+export function timeNote(now, lastReply, timeZone) {
+  const clock = new Intl.DateTimeFormat('en-US', {timeZone, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'})
+    .format(now).replace(/\u202f/g, ' ');
+  const gap = lastReply && now >= lastReply ? ` Your last reply ended ${elapsed(now - lastReply)} ago.` : '';
+  return {type: 'text', text: `<current_time>It is ${clock}.${gap} Use this to judge how much time has passed. No need to announce it.</current_time>`};
+}
+
+// The desktop draws an inline visualization from a line that wraps
+// visualize{"path":...} in the private-use characters U+E200, U+E202 and
+// U+E201. Claude cannot write them: Opus and Haiku dropped them even when told
+// to copy them, so the desktop showed the bare line as text. A line of Claude's
+// text that is exactly such a reference to an HTML file that exists gets them
+// back. Lines in code blocks stay as written.
+export function visualizeLine(line) {
+  const m=/^(\s*)visualize(\{.*\})\s*$/.exec(line);
+  if(!m)return line;
+  let ref;try{ref=JSON.parse(m[2]);}catch{return line;}
+  const file=ref?.path;
+  if(typeof file!=='string'||!path.isAbsolute(file)||!file.endsWith('.html'))return line;
+  try{if(!fs.statSync(file).isFile())return line;}catch{return line;}
+  return `${m[1]}\ue200visualize\ue202${m[2]}\ue201`;
+}
+// Streams one message's text, holding back only a line that may still turn
+// out to be a visualization reference until it ends.
+export class VisualizeLines {
+  line='';open=true;fence=false;
+  push(delta) {
+    let out='';
+    for(const ch of delta) {
+      if(ch==='\n') {
+        if(this.open)out+=this.fence?this.line:visualizeLine(this.line);
+        out+='\n';
+        if(/^\s*(```|~~~)/.test(this.line))this.fence=!this.fence;
+        this.line='';this.open=true;continue;
+      }
+      this.line+=ch;
+      if(!this.open){out+=ch;continue;}
+      const start=this.line.trimStart();
+      if(this.fence||!('visualize{'.startsWith(start)||start.startsWith('visualize{'))){this.open=false;out+=this.line;}
+    }
+    return out;
+  }
+  end() {const rest=this.open&&!this.fence?visualizeLine(this.line):this.open?this.line:'';this.line='';return rest;}
+}
+
 export const KEEPALIVE_MS = 10000;
 export class ResponseStream {
   constructor(res, model) {
-    this.res = res; this.id = uid('resp'); this.output = []; this.seq = 0; this.finished = false; this.model = model;this.frames=[];
+    this.res = res; this.id = uid('resp'); this.output = []; this.seq = 0; this.finished = false; this.model = model;this.frames=[];this.lines=new Map();
     res.writeHead(200, {'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'});
     this.send('response.created', {response: this.response('in_progress')});
     this.send('response.in_progress', {response: this.response('in_progress')});
@@ -340,10 +432,16 @@ export class ResponseStream {
     return index;
   }
   text(index, delta) {
+    if(!this.lines.has(index))this.lines.set(index,new VisualizeLines());
+    this.emit(index,this.lines.get(index).push(delta));
+  }
+  emit(index, delta) {
+    if(!delta)return;
     const item = this.output[index]; item.content[0].text += delta;
     this.send('response.output_text.delta', {item_id: item.id, output_index: index, content_index: 0, delta});
   }
   finishText(index, final) {
+    this.emit(index,this.lines.get(index)?.end());this.lines.delete(index);
     const item = this.output[index]; item.status = 'completed'; item.phase = final ? 'final_answer' : 'commentary';
     this.send('response.output_text.done', {item_id: item.id, output_index: index, content_index: 0, text: item.content[0].text});
     this.send('response.content_part.done', {item_id: item.id, output_index: index, content_index: 0, part: item.content[0]});
@@ -379,7 +477,7 @@ export class CompactionStream extends ResponseStream {
   // window, so the checkpoint is also sent as a message.
   complete(usage) {
     if(!this.summary.trim())return this.fail('Claude returned an empty compaction checkpoint.');
-    const message=super.startText();super.text(message,this.summary);super.finishText(message,true);
+    const message=super.startText();this.emit(message,this.summary);super.finishText(message,true);
     const item={type:'compaction',id:uid('cmp'),encrypted_content:sealCheckpoint(this.summary,this.token)};
     const index=this.output.push(item)-1;
     this.send('response.output_item.added',{output_index:index,item});

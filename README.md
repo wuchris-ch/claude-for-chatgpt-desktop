@@ -81,8 +81,8 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 **Works like GPT does in the app**
 
 - The in-app browser, computer control, terminal, file edits, plugins and connectors, with the app's approvals and tool cards.
-- Images, edits, regenerate, helper agents, review mode and chat titles.
-- Message Claude while it works. It answers you before its next step.
+- Images, edits, regenerate, helper agents, review mode, chat titles and inline visuals.
+- Message Claude while it works, even mid-reply. It answers you before its next step and carries on.
 - Stop, then continue where it left off.
 - A question card the app can't show goes back to Claude with the reason, so it asks in a form you can see.
 
@@ -96,15 +96,15 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 - One warm Claude process per chat. In daily use, 97 to 98% of input tokens came from the prompt cache.
 - Compaction reuses the cache, even when it fires in the middle of a turn.
-- Chats full of screenshots stay under the request size limit, and a stopped `clock.sleep` can't hold a session forever.
+- Chats full of screenshots stay under the request size limit, and a tool call the app never answers can't hold a session forever.
 
 **Tested**
 
-- 143 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 148 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
-- **macOS only.** Tested with ChatGPT 26.1007.21159 (Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.295 and Node.js 24.21. A later app or Claude Code release can need an update here.
+- **macOS only.** Tested with ChatGPT 26.1007.71326 (Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.300 and Node.js 24.21. A later app or Claude Code release can need an update here.
 - **Local tasks only.** Cloud tasks, voice, image generation and other OpenAI-hosted features stay with GPT. OpenAI-hosted tools, such as GPT's built-in web search, are left out of Claude's tools.
 - **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. Picker mode needs a ChatGPT sign-in, and isn't meant for ChatGPT workspaces with data-residency routing.
 - **GPT's summaries are encrypted for GPT.** If a chat that GPT compacted switches to Claude, Claude gets the messages after the summary and a note that it's unavailable.
@@ -324,8 +324,8 @@ python3 scripts/uninstall.py --delete-data   # also delete the Claude profile, h
 ## Development
 
 ```sh
-npm test               # 143 tests with stand-ins for Claude Code and OpenAI
-node e2e/live.mjs      # eleven short, low-effort checks with real Claude Code
+npm test               # 148 tests with stand-ins for Claude Code and OpenAI
+node e2e/live.mjs      # fifteen short checks with real Claude Code
 ```
 
 ## License

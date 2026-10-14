@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
-import {normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, newNotes, afterStop, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
+import {visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
 
 test('freeform tools preserve multiline JavaScript without JSON coercion',()=>{
  const [tool]=normalizeTools([{type:'custom',name:'exec',description:'Execute JS'}]);
@@ -71,6 +72,10 @@ test('system prompt corrects Codex identity and working directory for either too
  const code=systemPrompt(body,options);
  assert.match(code,/^# Personality\n\nYou are curious\.\n\ndev rule\n\n/);
  assert.match(code,/\n\nYou are Claude Sonnet, the main assistant\./);
+ // Since October 9, 2026 the base prompt arrives as a developer message with empty instructions.
+ const moved=systemPrompt({instructions:'',input:[{type:'message',role:'developer',content:'You are Claude Opus 5.5, running as the main assistant.\n\n# Personality\n\nAs Codex, you are curious.'},{type:'message',role:'developer',content:'dev rule'}]},{name:'Claude Opus 5.5'});
+ assert.match(moved,/^You are Claude Opus 5\.5, running as the main assistant\.\n\n# Personality\n\nYou are curious\.\n\ndev rule\n\nYou are Claude Opus 5\.5, the main assistant\./);
+ assert.doesNotMatch(moved,/As Codex/);
  assert.match(code,/inside exec as tools\.web__run/);
  assert.match(code,/exec_command and apply_patch are not top-level tools here\. Call them only from exec JavaScript as tools\.<name>, for example await tools\.exec_command/);
  assert.doesNotMatch(systemPrompt({...body,tools:[{type:'custom',name:'exec'}]},options),/not top-level tools/);
@@ -103,6 +108,19 @@ test('a mid-turn user message asks for a visible acknowledgment; notes and agent
  assert.ok(!JSON.stringify(steeringPrompt([dev])).includes(STEERING_NOTE));
  assert.ok(!JSON.stringify(steeringPrompt([mail])).includes(STEERING_NOTE));
 });
+test('a new turn carries the local time and how long ago Claude last replied',()=>{
+ const now=Date.UTC(2026,9,10,4,53,33);
+ assert.equal(timeNote(now,now-8*60000,'America/Vancouver').text,'<current_time>It is Friday, October 9, 2026 at 9:53 PM PDT. Your last reply ended 8 minutes ago. Use this to judge how much time has passed. No need to announce it.</current_time>');
+ assert.equal(timeNote(now,undefined,'America/Vancouver').text,'<current_time>It is Friday, October 9, 2026 at 9:53 PM PDT. Use this to judge how much time has passed. No need to announce it.</current_time>');
+ assert.deepEqual([20000,60000,119*60000,150*60000,47*3600000,49*3600000].map(elapsed),['less than a minute','1 minute','119 minutes','about 3 hours','about 47 hours','about 2 days']);
+ const user=(text,id)=>({type:'message',id,role:'user',content:[{type:'input_text',text}]});
+ const reply={type:'message',role:'assistant',content:[{type:'output_text',text:'done'}]};
+ const note={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted/>'}]};
+ assert.equal(userTurn([user('a','u1'),reply,note,user('b','u2')]),true);
+ // A turn that continues after tool results, as after a mid-turn compaction, brings no new message.
+ assert.equal(userTurn([user('a','u1'),{type:'function_call',call_id:'c1',name:'x',arguments:'{}'},{type:'function_call_output',call_id:'c1',output:'ok'}]),false);
+ assert.equal(userTurn([user('a','u1'),reply]),false);
+});
 test('only developer messages before the conversation form the system prompt; later notes stay in place',()=>{
  const dev=text=>({type:'message',role:'developer',content:[{type:'input_text',text}]});
  const user=(text,id)=>({type:'message',id,role:'user',content:[{type:'input_text',text}]});
@@ -133,14 +151,27 @@ test('after a Stop only what the stopped session never received is sent, with a 
  assert.equal(afterStop(input,historyStamp([user('edited','u1')]),[],[]),null);
  const text=resumeAfterStop(items,{reason:'Desktop cancelled or disconnected.',sent:1}).map(x=>x.text).join('');
  assert.match(text,/^<turn_stopped>Your previous turn was stopped before it finished\. A tool call shown as rejected or interrupted may still have run in the host\. The output the host recorded follows\.<\/turn_stopped><previous_tool_result call_id="c2">ran in host<\/previous_tool_result><developer_message><turn_aborted\/><\/developer_message>new$/);
- assert.match(resumeAfterStop([],{reason:'Bridge shutting down.'})[0].text,/bridge restart, not stopped by the user\. Continue the task from where it stopped\./);
+ assert.match(resumeAfterStop([],{reason:'Bridge shutting down.'})[0].text,/^<turn_stopped>Your previous turn was cut off by a bridge restart\. The user did not reject, stop or interrupt anything\..*Continue the task from where it stopped\./);
+ const aborted={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The previous turn was interrupted on purpose.</turn_aborted>'}]};
+ const steer=resumeAfterStop([user('keep both?','u4')],{reason:'Desktop cancelled or disconnected.',sent:0}).map(x=>x.text).join('');
+ assert.match(steer,/^<turn_stopped>The desktop restarted your response to deliver the message below, which the user sent while you were working\. The user did not stop you: .*Carry on with the task, taking the message into account\.<\/turn_stopped>keep both\?<developer_message>The user sent this while you were working\./);
+ assert.match(resumeAfterStop([user('keep both?','u4')],{reason:'Desktop cancelled or disconnected.',sent:1})[0].text,/restarted your response.*already reached the host/);
+ assert.match(resumeAfterStop([aborted,user('keep both?','u4')],{reason:'Desktop cancelled or disconnected.'})[0].text,/^<turn_stopped>Your previous turn was stopped before it finished\./);
+ const restarted=resumeAfterStop([aborted,user('new','u3')],{reason:'Bridge shutting down.',sent:1})[0].text;
+ assert.match(restarted,/^<turn_stopped>Your previous turn was stopped before it finished\./);assert.doesNotMatch(restarted,/did not reject|bridge restart/);
+ assert.match(stoppedTurnNote([aborted,{type:'custom_tool_call_output',call_id:'c1',output:'ran'}],{reason:'Bridge shutting down.',sent:1})[0].text,/^<turn_stopped>Your turn was stopped before it finished\./);
  assert.match(resumeAfterStop([user('new','u3')],{reason:'tool_cycle_interrupted',sent:1})[0].text,/stopped before it finished\. A tool call shown as rejected had already reached the host.*running it again\.<\/turn_stopped>$/);
 });
-test('a compaction of a stopped turn says which interrupted tool calls the host ran',()=>{
- const result={type:'custom_tool_call_output',call_id:'c1',output:'ran'};
- assert.equal(stoppedTurnNote([result],'compacted_mid_turn')[0].text,'<turn_stopped>Your turn was paused here so the host could compact the conversation. A tool call shown as rejected or interrupted ran in the host if output for it follows.</turn_stopped>');
- assert.match(stoppedTurnNote([result],'Desktop cancelled or disconnected.')[0].text,/^<turn_stopped>Your turn was stopped before it finished\. A tool call/);
- assert.deepEqual(stoppedTurnNote([{type:'message',id:'u2',role:'user',content:[{type:'input_text',text:'next'}]}],'compacted_mid_turn'),[]);
+test('a compaction of a stopped turn says which interrupted tool calls the host ran, and that the user did nothing when the host stopped it',()=>{
+ const result={type:'custom_tool_call_output',call_id:'c1',output:'ran'},next={type:'message',id:'u2',role:'user',content:[{type:'input_text',text:'next'}]};
+ assert.equal(stoppedTurnNote([result],{reason:'compacted_mid_turn',sent:1})[0].text,'<turn_stopped>The host paused your turn here to compact the conversation. The user did not reject, stop or interrupt anything. Claude Code wrote the "The user doesn\'t want to proceed" tool results, "[Request interrupted by user for tool use]" and any "No response requested." reply because of this, not because of anything the user did. The host ran each tool call whose output follows, so that output is the call\'s normal result. The checkpoint should leave out the pause and these marks, and record the task as still in progress, continuing from here.</turn_stopped>');
+ assert.match(stoppedTurnNote([result],{reason:'compacted_mid_turn',sent:2})[0].text,/normal result\. A call shown as rejected with no output here may have run in part or in full, so the checkpoint should say to check its effects/);
+ const none=stoppedTurnNote([next],{reason:'compacted_mid_turn',sent:1})[0].text;
+ assert.match(none,/did not reject, stop or interrupt anything\..*A call shown as rejected with no output here/);assert.doesNotMatch(none,/host ran each/);
+ assert.match(stoppedTurnNote([result],{reason:'Bridge shutting down.',sent:1})[0].text,/^<turn_stopped>Your turn was cut off here by a bridge restart\. The user did not reject/);
+ const stopped=stoppedTurnNote([result],{reason:'Desktop cancelled or disconnected.',sent:1})[0].text;
+ assert.match(stopped,/^<turn_stopped>Your turn was stopped before it finished\. A tool call/);assert.doesNotMatch(stopped,/did not reject/);
+ assert.deepEqual(stoppedTurnNote([next],{reason:'Desktop cancelled or disconnected.'}),[]);
 });
 test('an imported history explains the image copies Claude Code lists after it, and leaves plain attachments alone',()=>{
  const image={type:'input_image',image_url:'data:image/png;base64,YQ=='};
@@ -163,3 +194,27 @@ test('an imported history explains the image copies Claude Code lists after it, 
  // A transcript that ends on a screenshot result counts it as earlier context.
  assert.match(replayImageNote([user([{type:'input_text',text:'q'}],'u1'),call,shot])[0].text,/come from earlier/);
 });
+
+test('a bare visualization reference to an existing HTML file gets the desktop markers back',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge viz '));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const file=path.join(dir,'worker-client-runtime.html');fs.writeFileSync(file,'<div id="x">hi</div>');
+ const ref=`visualize{"path":${JSON.stringify(file)}}`,wrapped=`\ue200visualize\ue202{"path":${JSON.stringify(file)}}\ue201`;
+ assert.equal(visualizeLine(ref),wrapped);
+ assert.equal(visualizeLine(`visualize{"path":${JSON.stringify(file)},"mode":"wide"}`),`\ue200visualize\ue202{"path":${JSON.stringify(file)},"mode":"wide"}\ue201`);
+ for(const line of [`visualize{"path":${JSON.stringify(path.join(dir,'missing.html'))}}`,'visualize{"path":"relative.html"}',`visualize{"path":${JSON.stringify(file)}`,`see ${ref}`,wrapped])
+  assert.equal(visualizeLine(line),line);
+ const res=new EventEmitter();res.writeHead=()=>{};res.write=x=>(res.chunks??=[]).push(x);res.end=()=>{};
+ const s=new ResponseStream(res);const i=s.startText();
+ const text=`Here is the layout.\n\n${ref}\n\nSwitch tabs.\n\n\`\`\`text\n${ref}\n\`\`\`\nvisualize is a skill.\n${ref}`;
+ // Claude's text arrives in small pieces that split the reference anywhere.
+ for(let n=0;n<text.length;n+=7)s.text(i,text.slice(n,n+7));
+ s.finishText(i,true);s.complete();
+ const expected=`Here is the layout.\n\n${wrapped}\n\nSwitch tabs.\n\n\`\`\`text\n${ref}\n\`\`\`\nvisualize is a skill.\n${wrapped}`;
+ assert.equal(s.output[0].content[0].text,expected);
+ const events=res.chunks.join('').split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
+ assert.equal(events.filter(e=>e.type==='response.output_text.delta').map(e=>e.delta).join(''),expected);
+ assert.equal(events.find(e=>e.type==='response.output_text.done').text,expected);
+ // Text that cannot start a reference is not held back.
+ const lines=new VisualizeLines();assert.equal(lines.push('Working on '),'Working on ');assert.equal(lines.push('it.\nvis'),'it.\n');assert.equal(lines.push('it the page'),'visit the page');
+});
+

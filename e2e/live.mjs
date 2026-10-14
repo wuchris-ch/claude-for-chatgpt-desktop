@@ -3,12 +3,13 @@
 // random port with a temporary state folder. Each scenario sends a few short,
 // low-effort requests and uses your normal claude login (or ANTHROPIC_API_KEY
 // with CLAUDE_BRIDGE_AUTH=api_key).
-//   node e2e/live.mjs [models|tools|steer|image|switch|stop|compact|midturn ...]
+//   node e2e/live.mjs [models|tools|steer|image|switch|stop|compact|midturn|time|resample|visualize|toolwait ...]
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {deflateSync, crc32} from 'node:zlib';
-import {startBridge} from '../src/server.mjs';
+import {spawnSync} from 'node:child_process';
+import {startBridge, evictIdleSessions} from '../src/server.mjs';
 
 const wanted=process.argv.slice(2);
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-live-'));const logs=[];
@@ -101,7 +102,57 @@ const scenarios={
     const n=logs.length;
     const r=await done(await post('live-midturn',{...first,input:[...first.input,...a.output,ran,user('Summarize for a handoff.','u2')]},{headers:{'x-codex-turn-metadata':JSON.stringify({request_kind:'compaction'})}}));
     const summary=say(r.output);const fork=logs.slice(n).find(x=>x.event==='compaction_fork');
-    check('mid-turn compaction',/B-5521/.test(summary)&&fork?.stopped==='compacted_mid_turn'&&!logs.slice(n).some(x=>x.event==='compaction_import'),`${summary.length}-character checkpoint, build id ${/B-5521/.test(summary)?'kept':'missing'}, ${fork?`forked from the stopped turn (cold: ${fork.cold})`:'imported'}; ${cache(r)}`);
+    const blames=/\b(the )?user (has |had )?(rejected|interrupted|stopped|declined|cancell?ed|denied)|(rejected|interrupted|stopped) by the user|user'?s? (rejection|interruption)/i.test(summary);
+    check('mid-turn compaction',/B-5521/.test(summary)&&!blames&&fork?.stopped==='compacted_mid_turn'&&!logs.slice(n).some(x=>x.event==='compaction_import'),`${summary.length}-character checkpoint, build id ${/B-5521/.test(summary)?'kept':'missing'}, ${fork?`forked from the stopped turn (cold: ${fork.cold})`:'imported'}${blames?', blames the user for the pause':''}; ${cache(r)}`);
+  },
+  async time() {
+    const first={...base('claude-sonnet'),input:[user('Remember the code word HERON. Reply OK.','u1')]};
+    const a=await done(await post('live-time',first));await settle();
+    const b=await done(await post('live-time',{...first,input:[...first.input,...a.output,user('What is my local time now, to the minute? Reply with only the time.','u2')]}));
+    const now=new Date(),said=say(b.output),m=/(\d{1,2}):(\d\d)/.exec(said);
+    const off=m?Math.abs((Number(m[1])%12)*60+Number(m[2])-((now.getHours()%12)*60+now.getMinutes())):null;
+    check('time of day',off!==null&&Math.min(off,720-off)<=2&&!/\d:\d\d/.test(say(a.output)),`"${said}" at ${now.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}; the first reply "${say(a.output)}" did not announce it`);
+  },
+  async resample() {
+    // A message sent while a response streams: the desktop cancels the response
+    // and sends the request again with the message appended.
+    const first={...base('claude-opus',runJob),reasoning:{effort:'high'},input:[user('Release check, one job at a time: call run_job for "build", then for "test", then for "deploy-staging". Then report the build id in one line.','u1')]};
+    const a=await done(await post('live-resample',first));const call=a.output.find(x=>x.type==='function_call');
+    if(!call)return check('mid-response message',false,'no tool call: '+say(a.output));
+    let input=[...first.input,...a.output,{type:'function_call_output',call_id:call.call_id,output:'build passed: build id B-7731'}];
+    const abort=new AbortController();const n=logs.length;
+    const response=await post('live-resample',{...first,input},{signal:abort.signal});
+    const reading=(async()=>{try{const reader=response.body.getReader();while(!(await reader.read()).done);}catch{}})();
+    await new Promise(r=>setTimeout(r,1200));abort.abort();await reading;await settle();
+    input=[...input,user('quick q, is running the tests before deploying actually needed here, and does it cost me anything?','u2')];
+    const b=await done(await post('live-resample',{...first,input}));
+    const resumed=logs.slice(n).find(x=>x.event==='stopped_turn_resumed'),next=b.output.find(x=>x.type==='function_call');
+    check('mid-response message',!!next&&(!resumed||resumed.steer),`${resumed?(resumed.steer?'resumed as a mid-turn message':'resumed as a stopped turn'):'the call was out before the cancel'}, then "${say(b.output).slice(0,120)}" and ${next?'run_job('+next.arguments+')':'no further call'}`);
+  },
+  async visualize() {
+    // The desktop draws an inline visual only from a reference wrapped in
+    // private-use characters, which Claude cannot write. The bridge adds them.
+    const folder=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-live-viz-'));const file=path.join(folder,'hello.html');
+    const shell=[{type:'function',name:'exec_command',description:'Runs a shell command on the host and returns its output.',parameters:{type:'object',properties:{cmd:{type:'string'}},required:['cmd']}}];
+    let input=[user(`Write a one-line HTML fragment, a div saying Hello, to ${file} with exec_command. Then end your answer with this line on its own: visualize{"path":"${file}"}`,'u1')],r;
+    for(let i=0;i<4;i++) {
+      r=await done(await post('live-visualize',{...base('claude-opus',shell),input}));input=[...input,...r.output];
+      const calls=r.output.filter(x=>x.type==='function_call');if(!calls.length)break;
+      input=[...input,...calls.map(c=>{const x=spawnSync('bash',['-c',JSON.parse(c.arguments).cmd],{encoding:'utf8',timeout:20000});return {type:'function_call_output',call_id:c.call_id,output:((x.stdout??'')+(x.stderr??'')).slice(0,2000)||'(no output)'};})];
+    }
+    const text=say(r.output);fs.rmSync(folder,{recursive:true,force:true});
+    check('inline visualization',/\ue200visualize\ue202\{.*\}\ue201/.test(text),`reference ${text.includes('\ue200')?'with':'without'} the desktop's markers`);
+  },
+  async toolwait() {
+    // A thread archived or left during a tool call never sends the result.
+    const first={...base('claude-opus',runJob),input:[user('Call run_job for "build" once, then report the build id in one line.','u1')]};
+    const a=await done(await post('live-toolwait',first));const call=a.output.find(x=>x.type==='function_call');
+    if(!call)return check('abandoned tool call',false,'no tool call: '+say(a.output));
+    const n=logs.length;
+    await evictIdleSessions(bridge,Date.now()+bridge.toolWaitMs+1000);await settle();
+    const b=await done(await post('live-toolwait',{...first,input:[...first.input,...a.output,{type:'function_call_output',call_id:call.call_id,output:'build passed: build id B-7731'}]}));
+    const resumed=logs.slice(n).find(x=>x.event==='stopped_turn_resumed');
+    check('abandoned tool call',logs.slice(n).some(x=>x.event==='host_tool_abandoned')&&!!resumed&&/B-7731/.test(say(b.output))&&!b.output.some(x=>x.type==='function_call'),`stopped after the wait limit; the late result ${resumed?'resumed the session':'did not resume it'}: "${say(b.output).slice(0,120)}"`);
   },
 };
 

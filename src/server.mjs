@@ -28,8 +28,18 @@ export function findClaude(env=process.env,fallbacks=CLAUDE_FALLBACK_DIRS) {
   throw new Error('Claude Code was not found. Install it from https://code.claude.com/docs/en/setup or set CLAUDE_BIN to its path.');
 }
 
+// A host tool call in a thread that is archived, deleted or left after a Stop
+// never returns. Claude Code waited on it until the bridge restarted, holding
+// the session active and blocking idle installs: 3 times from October 1 to 12,
+// 2026, for up to 24 hours. The longest real wait from September 24 to October
+// 13 was 45 minutes over 28,722 calls. A result that arrives later is sent to
+// the resumed session.
 export async function evictIdleSessions(bridge,now=Date.now()) {
   for(const [key,session] of bridge.sessions) {
+    if(session.child&&!session.stream&&!session.accepting&&!session.exiting&&now-session.lastUsed>=bridge.toolWaitMs) {
+      session.log('host_tool_abandoned',{waited_ms:now-session.lastUsed});
+      session.cancel('The desktop never returned a tool result.');await session.exiting;continue;
+    }
     if(session.child||session.accepting||session.exiting||session.stream||now-session.lastUsed<300000)continue;
     bridge.sessions.delete(key);
     await session.mcp?.close();
@@ -55,7 +65,7 @@ export function pruneToolSets(directory,now=Date.now()) {
 // reads Claude Code's credentials.
 // gatewayKey turns on picker mode, where the app's own OpenAI provider is
 // pointed at /g/<gatewayKey>/backend-api/codex (see gateway.mjs).
-export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000}) {
+export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000}) {
   if(!AUTH_MODES.includes(auth?.mode))throw new Error(`Unknown auth mode ${auth?.mode}. Use one of: ${AUTH_MODES.join(', ')}.`);
   if(auth.mode==='api_key'&&typeof auth.apiKey!=='function')throw new Error('API key mode needs an apiKey function.');
   fs.mkdirSync(stateDir,{recursive:true,mode:0o700});
@@ -66,7 +76,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   const cacheTimer=setInterval(()=>{try{pruneResponseCache(cacheDir);pruneToolSets(toolSetDir);}catch(error){log('cache_cleanup_error',{message:error.message});}},900000);cacheTimer.unref();
   // resolvedModels maps a catalog slug to the model Claude Code last started
   // for it, so later processes pin aliases to the same version.
-  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
+  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
   // startedModels keeps the same record across restarts, for the names the
   // picker shows only. Pinning starts empty, so an alias still follows Claude
   // Code to a new release after a restart.
