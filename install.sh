@@ -82,6 +82,9 @@ PY
     fail "Nothing to uninstall: no copy of Claude for ChatGPT Desktop was found in $RUNTIME."
   fi
   cd "$SRC"
+  # Copies from before 0.3.6 remove the service without turning picker mode
+  # off, which would leave GPT pointing at a bridge that is gone.
+  python3 scripts/picker.py uninstall
   python3 scripts/uninstall.py
   say "Removed. Your Claude profile, history and logs stay in $RUNTIME."
   echo "To delete them too: python3 \"$SRC/scripts/uninstall.py\" --delete-data"
