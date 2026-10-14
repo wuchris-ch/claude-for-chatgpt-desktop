@@ -8,7 +8,7 @@ import https from 'node:https';
 import {EventEmitter} from 'node:events';
 import {timingSafeEqual} from 'node:crypto';
 import {WebSocketServer, WebSocket} from 'ws';
-import {digest, uid, isBridgeId, openCheckpoint} from './protocol.mjs';
+import {digest, uid, isBridgeId, checkpointText} from './protocol.mjs';
 import {catalogEntries, pickTemplate} from './catalog.mjs';
 import {labeled} from './models.mjs';
 
@@ -55,7 +55,7 @@ export function prepareForOpenAI(input,token) {
   const out=input.map(x=>{
     if(['compaction','context_compaction'].includes(x?.type)&&String(x.encrypted_content??'').startsWith(BRIDGE_CHECKPOINT)) {
       checkpoints++;
-      return {type:'message',role:'user',content:[{type:'input_text',text:'<context_checkpoint>\n'+openCheckpoint(x.encrypted_content,token)+'\n</context_checkpoint>\nContinue the existing task from this checkpoint.'}]};
+      return {type:'message',role:'user',content:[{type:'input_text',text:checkpointText(x.encrypted_content,token)}]};
     }
     if(!isBridgeId(x?.id))return x;
     ids++;
@@ -200,7 +200,9 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
   // GPT responses in flight, so an install or restart can wait for them.
   let active=0;
   const track=promise=>{active++;return Promise.resolve(promise).finally(()=>{active--;});};
-  const wss=new WebSocketServer({noServer:true,perMessageDeflate:true,maxPayload:256*1024*1024});
+  // The app's side of each connection takes the subprotocol OpenAI accepted.
+  const protocols=new WeakMap();
+  const wss=new WebSocketServer({noServer:true,perMessageDeflate:true,maxPayload:256*1024*1024,handleProtocols:(offered,req)=>protocols.get(req)||false});
   const handshakeHeaders=new WeakMap();
   wss.on('headers',(headers,req)=>{const extra=handshakeHeaders.get(req);if(extra)headers.push(...extra);});
 
@@ -231,9 +233,9 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
   // reads (turn state, server model, reasoning) arrive as before.
   function handleUpgrade(req,socket,head,sub,url) {
     const fail=(status,text)=>{socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);};
-    if(sub!=='/responses')return fail(404,'Not Found');
-    const target=new URL(upstream.replace(/^http/,'ws')+'/responses'+url.search);
-    const up=new WebSocket(target,{headers:forwardHeaders(req.headers,HANDSHAKE),perMessageDeflate:true,handshakeTimeout:15000,maxPayload:256*1024*1024});
+    const target=new URL(upstream.replace(/^http/,'ws')+sub+url.search);
+    const offered=String(req.headers['sec-websocket-protocol']??'').split(',').map(x=>x.trim()).filter(Boolean);
+    const up=new WebSocket(target,offered.length?offered:undefined,{headers:forwardHeaders(req.headers,HANDSHAKE),perMessageDeflate:true,handshakeTimeout:15000,maxPayload:256*1024*1024});
     let settled=false,extra=[];
     up.on('upgrade',response=>{
       for(const [name,value] of Object.entries(response.headers)) {
@@ -256,8 +258,8 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     });
     up.on('error',error=>{if(!settled){settled=true;log('gateway_upstream_error',{code:error.code,transport:'websocket'});fail(502,'Bad Gateway');}});
     up.on('open',()=>{
-      settled=true;handshakeHeaders.set(req,extra);
-      wss.handleUpgrade(req,socket,head,client=>relay(client,up,req));
+      settled=true;handshakeHeaders.set(req,extra);if(up.protocol)protocols.set(req,up.protocol);
+      wss.handleUpgrade(req,socket,head,client=>sub==='/responses'?relay(client,up,req):pipe(client,up,sub));
     });
     socket.on('error',()=>up.terminate());
   }
@@ -266,7 +268,8 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     const claude=new ClaudeChannel({client,req,serve,log});
     let upClosed=null,pending=0;
     const settle=count=>{active-=count;pending-=count;};
-    client.on('message',(data,isBinary)=>{
+    // An error here would end the whole bridge, and with it every chat.
+    client.on('message',(data,isBinary)=>{try{
       let message=null;
       if(!isBinary)try{message=JSON.parse(data.toString());}catch{}
       if(message?.type==='response.create'&&bridge.models.get(message.model)){claude.create(message);return;}
@@ -278,7 +281,10 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
       }
       if(up.readyState===WebSocket.OPEN)up.send(data,{binary:isBinary});
       else client.send(JSON.stringify({type:'error',status:502,error:{type:'server_error',message:'The connection to OpenAI closed. Retry the request.'}}));
-    });
+    }catch(error){
+      log('gateway_ws_error',{message:error.message});
+      if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({type:'error',status:500,error:{type:'server_error',message:'The bridge could not relay this request: '+error.message}}));
+    }});
     up.on('message',(data,isBinary)=>{
       if(pending&&!isBinary&&/"type"\s*:\s*"(response\.(completed|failed|incomplete)|error)"/.test(data.toString().slice(0,200)))settle(1);
       if(!isBinary&&data.includes('x-models-etag'))try{
@@ -293,6 +299,17 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     up.on('close',(code,reason)=>{upClosed={code,reason};if(claude.res)claude.onIdle=closeClient;else closeClient();});
     client.on('close',()=>{settle(pending);claude.interrupt();if(up.readyState===WebSocket.OPEN||up.readyState===WebSocket.CONNECTING)up.close();});
     up.on('close',()=>settle(pending));
+    up.on('error',()=>{});client.on('error',()=>{});
+  }
+
+  // Other WebSockets on the Codex route, such as voice, go to OpenAI unchanged.
+  function pipe(client,up,sub) {
+    log('gateway_ws_relayed',{path:sub});
+    const code=c=>c>=1000&&c<5000&&![1004,1005,1006].includes(c)?c:1000;
+    up.on('message',(data,isBinary)=>{if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});});
+    client.on('message',(data,isBinary)=>{if(up.readyState===WebSocket.OPEN)up.send(data,{binary:isBinary});});
+    up.on('close',(c,reason)=>{try{client.close(code(c),reason);}catch{client.terminate();}});
+    client.on('close',(c,reason)=>{if(up.readyState===WebSocket.OPEN)up.close(code(c),reason);else if(up.readyState===WebSocket.CONNECTING)up.terminate();});
     up.on('error',()=>{});client.on('error',()=>{});
   }
 

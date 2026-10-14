@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Stop and remove the bridge service.
 
-Keeps the isolated profile, its conversations and the bridge's state unless
---delete-data is given. Your normal ChatGPT profile is never touched.
+Turns picker mode off first if it is on, so GPT keeps working without the
+bridge. Keeps the isolated profile, its conversations and the bridge's state
+unless --delete-data is given.
 """
 import argparse
 import os
 import pathlib
 import shutil
 import subprocess
-from bridge_config import APP_NAME, DEFAULT_LABEL, load_launch, runtime_dir
+from bridge_config import APP_NAME, DEFAULT_LABEL, load_launch, runtime_dir, source_home
+import picker
 
 parser=argparse.ArgumentParser(description='Remove the '+APP_NAME+' service.')
 parser.add_argument('--delete-data',action='store_true',help='Also delete the runtime folder: isolated profile, history, logs and bridge state')
@@ -17,6 +19,8 @@ args=parser.parse_args()
 runtime=runtime_dir()
 config=load_launch(runtime) if (runtime/'launch.json').exists() else {}
 label=config.get('launch_agent') or config.get('label') or DEFAULT_LABEL
+# Without this, the app would keep sending GPT to a service that is gone.
+picker.uninstall(source_home(),runtime)
 subprocess.run(['launchctl','bootout','gui/'+str(os.getuid())+'/'+label],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 agent=pathlib.Path.home()/'Library/LaunchAgents'/f'{label}.plist'
 agent.unlink(missing_ok=True)

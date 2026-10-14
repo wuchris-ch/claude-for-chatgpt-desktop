@@ -2,7 +2,35 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, and 0.3.6 fixes found in a review of picker mode. The newest checks come first.
+
+## Release 0.3.6, checked October 14, 2026
+
+A review of picker mode, which had seen far less daily use than the separate window, found these problems. Each new test below fails on 0.3.5.
+
+### A Claude checkpoint the bridge cannot open
+
+The bridge seals Claude's compaction checkpoints with its own token. After a reinstall that deleted the runtime folder, the token is new, and an older thread where Claude had compacted carried a checkpoint the bridge could no longer open. When such a thread went to GPT over the app's WebSocket, the error was thrown inside the WebSocket handler and stopped the whole bridge, ending every chat's stream, and the app's retries started it again. Over HTTP, and for Claude, the thread failed with an error on every request. Such a checkpoint now becomes a note that the earlier summary can't be read, and the thread continues from the messages kept after it. An error in the WebSocket handler is now reported on that connection only.
+
+### Uninstalling while picker mode is on
+
+`uninstall.py` removed the service without touching the ChatGPT profile, so after `uninstall.py --delete-data`, or after deleting the runtime folder, `config.toml` still pointed GPT at the bridge. `picker.py uninstall` decided only from its state file, which was gone, so nothing could take the setting out again. Now `uninstall.py` turns picker mode off first. `picker.py uninstall` and `install.sh --uninstall` remove the marked setting even without the runtime folder, and `install.sh --uninstall` also finds the copy the service runs when the source folder is gone. If the marked line was edited so it can't be found, uninstall stops and names the line to delete instead of reporting success. In a temporary profile with the real service installed, `uninstall.py --delete-data` restored `config.toml` byte for byte and then removed the service and the folder.
+
+### A symlinked config.toml
+
+The atomic write replaced a symlinked `config.toml`, such as one kept in a dotfiles repository, with a regular file, and the link was lost. Writes now go to the file the link points to.
+
+### Other WebSockets on the Codex route
+
+The gateway accepted a WebSocket only at `/responses` and refused any other path with 404. The app's runtime contains a realtime voice client. Other WebSockets on the Codex route, with any subprotocol OpenAI accepts, are now relayed to OpenAI unchanged. Whether the app's voice uses this route was not checked live.
+
+### Automated tests in 0.3.6
+
+153 tests pass: 122 Node tests and 31 Python tests. New in 0.3.6:
+
+- A checkpoint sealed by an earlier installation reaches GPT over HTTP and WebSocket, and Claude, as a note, and the bridge keeps serving.
+- A WebSocket on another path of the Codex route is relayed with its subprotocol, path and login.
+- Uninstall without the runtime folder removes the setting and a model list that lists Claude; an edited marker stops uninstall with the line to delete; a symlinked `config.toml` stays a link through install and uninstall.
 
 ## Release 0.3.5, checked October 14, 2026
 

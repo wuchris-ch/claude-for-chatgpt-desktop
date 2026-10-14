@@ -48,10 +48,40 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/scripts/
 fi
 
 if [ "$MODE" = uninstall ]; then
-  SRC="${SRC:-$RUNTIME/source}"
-  [ -f "$SRC/scripts/uninstall.py" ] || fail "Nothing to uninstall: $SRC is missing."
+  # A copy installed from a clone has no source folder here, but the service
+  # keeps its own copy of the scripts.
+  for dir in "$SRC" "$RUNTIME/source" "$RUNTIME/app"; do
+    if [ -n "$dir" ] && [ -f "$dir/scripts/uninstall.py" ]; then SRC="$dir"; break; fi
+  done
+  if [ ! -f "${SRC:-}/scripts/uninstall.py" ]; then
+    # With the runtime folder gone, only the setting is left to remove.
+    config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+    if grep -qs '^# Added by claude-for-chatgpt-desktop' "$config"; then
+      python3 - "$config" <<'PY'
+import os, re, sys
+path = os.path.realpath(sys.argv[1])
+lines = open(path).read().split('\n')
+kept, skip = [], False
+for line in lines:
+    if line.startswith('# Added by claude-for-chatgpt-desktop'):
+        skip = True
+        continue
+    if skip and re.match(r'[ \t]*openai_base_url[ \t]*=', line):
+        skip = False
+        continue
+    skip = False
+    kept.append(line)
+with open(path + '.picker-tmp', 'w') as f:
+    f.write('\n'.join(kept))
+os.chmod(path + '.picker-tmp', os.stat(path).st_mode & 0o777)
+os.replace(path + '.picker-tmp', path)
+PY
+      say "Removed the picker setting from $config. Restart ChatGPT."
+      exit 0
+    fi
+    fail "Nothing to uninstall: no copy of Claude for ChatGPT Desktop was found in $RUNTIME."
+  fi
   cd "$SRC"
-  python3 scripts/picker.py uninstall
   python3 scripts/uninstall.py
   say "Removed. Your Claude profile, history and logs stay in $RUNTIME."
   echo "To delete them too: python3 \"$SRC/scripts/uninstall.py\" --delete-data"

@@ -8,7 +8,7 @@ import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
 import {Session} from './session.mjs';
 import {createSearchHandler} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
-import {digest, openCheckpoint, sealCheckpoint, validateRequestOptions} from './protocol.mjs';
+import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions} from './protocol.mjs';
 import {loadModels, effortFor, labelFor} from './models.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const MAX_REQUEST_BYTES=256*1024*1024;
@@ -141,16 +141,15 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     const thread=req.headers['thread-id']??req.headers['session-id']??req.headers.session_id??body.prompt_cache_key;
     if(!thread)return json(res,400,{error:{message:'A stable desktop thread identifier is required.'}});
     const cacheFile=path.join(cacheDir,digest([thread,metadata.context_window_id,metadata.turn_id,kind,body])+'.sealed');
-    if(fs.existsSync(cacheFile)&&Date.now()-fs.statSync(cacheFile).mtimeMs<=86400000) {
-      const frames=openCheckpoint(fs.readFileSync(cacheFile,'utf8'),token);
-      bridge.log('response_replayed',{thread});res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});res.end(frames);return;
-    }
+    let frames=null;
+    if(fs.existsSync(cacheFile)&&Date.now()-fs.statSync(cacheFile).mtimeMs<=86400000)try{frames=openCheckpoint(fs.readFileSync(cacheFile,'utf8'),token);}catch{}
+    if(frames){bridge.log('response_replayed',{thread});res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});res.end(frames);return;}
     const checkpoints=body.input.filter(x=>x.type==='compaction'||x.type==='context_compaction');
     const checkpointKey=checkpoints.length?digest(checkpoints.at(-1).encrypted_content):'none';
     // A checkpoint written by GPT is encrypted by OpenAI and cannot be read here.
     body={...body,input:body.input.map(x=>!['compaction','context_compaction'].includes(x.type)?x
       :{type:'message',id:x.id,role:'user',content:[{type:'input_text',text:String(x.encrypted_content??'').startsWith(BRIDGE_CHECKPOINT)
-        ?'<context_checkpoint>\n'+openCheckpoint(x.encrypted_content,token)+'\n</context_checkpoint>\nContinue the existing task from this checkpoint.'
+        ?checkpointText(x.encrypted_content,token)
         :'<context_checkpoint>Earlier conversation was compacted by another model. Its summary is encrypted for that model and is not available here; the messages kept after it follow. Ask the user if something important is missing.</context_checkpoint>'}]})};
     if(kind==='compaction') {body.__bridge_compaction=true;body.tools=[];body.__bridge_turn_key=[thread,metadata.context_window_id??'default','turn',checkpointKey].join(':');}
     body.__bridge_model=model;

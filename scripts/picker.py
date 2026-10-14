@@ -76,6 +76,9 @@ def remove_setting(text):
 
 
 def write_atomic(path, data, mode=None):
+    # A config.toml kept in a dotfiles repository is often a symlink. Writing
+    # its target keeps the link.
+    path = pathlib.Path(os.path.realpath(path))
     temporary = path.with_name(path.name+'.picker-tmp')
     temporary.write_bytes(data)
     if path.exists():
@@ -143,22 +146,47 @@ def install(codex, runtime, service=True):
     print('Restart the ChatGPT app, then choose a Claude model in the picker.')
 
 
+def still_set(text):
+    return any('/g/' in line and '127.0.0.1' in line for line in KEY_LINE.findall(text))
+
+
+def remove_or_explain(config_file, text):
+    """Remove the marked setting, or stop with the line to delete by hand."""
+    updated = remove_setting(text)
+    if still_set(updated):
+        lines = [line.strip() for line in KEY_LINE.findall(updated) if '/g/' in line and '127.0.0.1' in line]
+        raise SystemExit('Could not find the marked setting in '+str(config_file)+'. GPT will not work until you delete this line from it: '+lines[0])
+    write_atomic(config_file, updated.encode())
+
+
 def uninstall(codex, runtime):
     state_file = runtime/'picker.json'
     if not state_file.exists():
-        print('Picker mode is not on. Nothing to undo.')
+        # The runtime folder was deleted or replaced while the setting stayed,
+        # which leaves GPT pointing at a bridge that is gone.
+        config_file = codex/'config.toml'
+        text = config_file.read_text() if config_file.exists() else ''
+        if not (MARK in text or still_set(text)):
+            print('Picker mode is not on. Nothing to undo.')
+            return
+        remove_or_explain(config_file, text)
+        cache_file = codex/'models_cache.json'
+        if cache_file.exists() and '"claude-' in cache_file.read_text(errors='replace'):
+            cache_file.unlink()
+        print('Picker mode is off:', config_file, 'no longer points ChatGPT at the bridge.')
+        print('Restart the ChatGPT app.')
         return
     state = json.loads(state_file.read_text())
     codex = pathlib.Path(state['codex_home'])
     backup = pathlib.Path(state['backup'])
     config_file, cache_file = codex/'config.toml', codex/'models_cache.json'
     current = config_file.read_bytes() if config_file.exists() else b''
-    if sha(current) == state['config_sha_after']:
+    if sha(current) == state['config_sha_after'] and (backup/'config.toml').exists():
         original = (backup/'config.toml').read_bytes()
         write_atomic(config_file, original)
         how = 'restored byte for byte from the backup'
     else:
-        write_atomic(config_file, remove_setting(current.decode()).encode())
+        remove_or_explain(config_file, current.decode())
         how = 'removed the openai_base_url setting and kept your later edits'
     if (backup/'models_cache.json').exists():
         shutil.copy2(backup/'models_cache.json', cache_file)

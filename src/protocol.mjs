@@ -46,6 +46,14 @@ export function openCheckpoint(value, token) {
   return data.summary;
 }
 
+// A checkpoint sealed under another bridge token, as after a reinstall that
+// deleted the data folder, cannot be opened. The thread goes on from the
+// messages kept after it instead of failing on every request.
+export function checkpointText(value, token) {
+  try {return '<context_checkpoint>\n'+openCheckpoint(value, token)+'\n</context_checkpoint>\nContinue the existing task from this checkpoint.';}
+  catch {return '<context_checkpoint>Earlier conversation was compacted by Claude, but its summary was sealed by an earlier installation of the bridge and cannot be read here; the messages kept after it follow. Ask the user if something important is missing.</context_checkpoint>';}
+}
+
 // Codex constrains GPT's apply_patch output with a Lark grammar that an MCP
 // schema cannot carry, and documents the tool only as FREEFORM. Without the
 // format, Opus left out *** End Patch or sent two patches in one call.

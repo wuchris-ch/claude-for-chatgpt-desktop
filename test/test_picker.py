@@ -84,6 +84,40 @@ class PickerTests(unittest.TestCase):
         self.assertIn('[tui]\nx = 1', result)
         self.assertIn('# a comment the user wrote', result)
 
+    def test_uninstall_after_the_runtime_folder_is_gone_still_removes_the_setting(self):
+        self.run_picker('install')
+        (self.codex/'models_cache.json').write_text('{"models":[{"slug":"gpt-6-astra"},{"slug":"claude-opus"}]}')
+        for name in ['picker.json', 'gateway-key']:
+            (self.runtime/name).unlink()
+        self.run_picker('uninstall')
+        result = (self.codex/'config.toml').read_text()
+        self.assertNotIn('openai_base_url', result)
+        self.assertNotIn(picker.MARK, result)
+        self.assertIn('# a comment the user wrote', result)
+        self.assertFalse((self.codex/'models_cache.json').exists())
+
+    def test_uninstall_stops_with_the_line_when_the_marker_was_edited(self):
+        self.run_picker('install')
+        config = self.codex/'config.toml'
+        config.write_text(config.read_text().replace(picker.MARK, '# bridge'))
+        with self.assertRaises(SystemExit) as raised:
+            self.run_picker('uninstall')
+        self.assertIn('openai_base_url = "http://127.0.0.1:19490/g/', str(raised.exception))
+        self.assertTrue((self.runtime/'picker.json').exists())
+
+    def test_a_symlinked_config_stays_a_link(self):
+        target = self.codex.parent/'dotfiles'/'config.toml'
+        target.parent.mkdir()
+        target.write_bytes(CONFIG)
+        (self.codex/'config.toml').unlink()
+        (self.codex/'config.toml').symlink_to(target)
+        self.run_picker('install')
+        self.assertTrue((self.codex/'config.toml').is_symlink())
+        self.assertIn('openai_base_url', target.read_text())
+        self.run_picker('uninstall')
+        self.assertTrue((self.codex/'config.toml').is_symlink())
+        self.assertEqual(target.read_bytes(), CONFIG)
+
     def test_an_existing_openai_base_url_is_left_alone(self):
         (self.codex/'config.toml').write_bytes(b'openai_base_url = "https://proxy.example/v1"\n' + CONFIG)
         with self.assertRaises(SystemExit) as raised:

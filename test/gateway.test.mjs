@@ -19,7 +19,7 @@ const events=text=>text.split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSO
 
 // A stand-in for OpenAI's Codex backend: HTTP routes and a Responses WebSocket.
 async function fakeOpenAI(t) {
-  const seen={http:[],ws:[],handshakes:[]};
+  const seen={http:[],ws:[],handshakes:[],paths:[]};
   const server=http.createServer(async(req,res)=>{
     const chunks=[];for await(const c of req)chunks.push(c);
     const body=Buffer.concat(chunks);seen.http.push({method:req.method,url:req.url,headers:req.headers,body});
@@ -34,7 +34,7 @@ async function fakeOpenAI(t) {
   const wss=new WebSocketServer({noServer:true});
   wss.on('headers',headers=>headers.push('x-codex-turn-state: sticky-ws','openai-model: gpt-fixture','x-reasoning-included: true','x-models-etag: W/"models-1"'));
   server.on('upgrade',(req,socket,head)=>{
-    seen.handshakes.push(req.headers);
+    seen.handshakes.push(req.headers);seen.paths.push(req.url);
     if(req.headers.authorization==='Bearer expired'){socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{"e":"exp"}');return;}
     wss.handleUpgrade(req,socket,head,ws=>ws.on('message',data=>{
       const message=JSON.parse(data.toString());seen.ws.push(message);
@@ -236,6 +236,38 @@ test('requests for GPT drop the ids of items Claude wrote and keep every other i
  check(openai.seen.ws[0]);
  assert.deepEqual(logs.filter(x=>x.event==='claude_ids_removed_for_gpt').map(x=>x.transport),['http','websocket']);
  c.ws.close();
+});
+
+test('a Claude checkpoint sealed by an earlier installation becomes a note, and the bridge keeps serving',async t=>{
+ const {openai,post,bridge,app,logs}=await setup(t);
+ const stale={type:'compaction',encrypted_content:sealCheckpoint('old summary','an-earlier-token')};
+ const input=[user('remember amber pine 742','u1'),stale,user('next','u2')];
+ await(await post({model:'gpt-fixture',stream:true,input})).text();
+ assert.match(JSON.parse(openai.seen.http[0].body.toString()).input[1].content[0].text,/sealed by an earlier installation/);
+ const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',app);
+ c.ws.send(JSON.stringify({type:'response.create',model:'gpt-fixture',input,stream:true}));
+ await c.next('response.completed');
+ assert.match(openai.seen.ws[0].input[1].content[0].text,/sealed by an earlier installation/);
+ c.ws.close();
+ const claude=events(await(await post({model:'claude-opus',stream:true,tools,input:[stale,user('echo-input after reinstall','u3')]},{'thread-id':'thread-2'})).text()).at(-1).response.output;
+ assert.match(JSON.stringify(claude),/sealed by an earlier installation/);
+ assert.equal(logs.some(x=>['request_error','gateway_ws_error'].includes(x.event)),false);
+});
+
+test('other WebSockets on the Codex route, such as voice, are relayed to OpenAI unchanged',async t=>{
+ const {openai,bridge,app,logs}=await setup(t);
+ const ws=new WebSocket(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/realtime?call_id=call_1',['realtime'],{headers:app});
+ const received=[];ws.on('message',d=>received.push(JSON.parse(d.toString())));
+ await new Promise((resolve,reject)=>{ws.on('open',resolve);ws.on('error',reject);});
+ assert.equal(ws.protocol,'realtime');
+ ws.send(JSON.stringify({type:'session.update',session:{voice:'fixture'}}));
+ for(let i=0;i<200&&!received.some(x=>x.type==='response.completed');i++)await new Promise(r=>setTimeout(r,10));
+ assert.deepEqual(received.map(x=>x.type),['codex.response.metadata','response.created','response.completed']);
+ assert.deepEqual(openai.seen.ws,[{type:'session.update',session:{voice:'fixture'}}]);
+ assert.equal(openai.seen.paths.at(-1),'/backend-api/codex/realtime?call_id=call_1');
+ assert.equal(openai.seen.handshakes.at(-1).authorization,'Bearer chatgpt-fixture-token');
+ assert.ok(logs.some(x=>x.event==='gateway_ws_relayed'&&x.path==='/realtime'));
+ ws.close();
 });
 
 test('when OpenAI cannot be reached, HTTP gets 502 and the WebSocket handshake fails',async t=>{

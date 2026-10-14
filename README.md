@@ -100,13 +100,13 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 148 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 153 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
 - **macOS only.** Tested with ChatGPT 26.1007.71326 (Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.300 and Node.js 24.21. A later app or Claude Code release can need an update here.
 - **Local tasks only.** Cloud tasks, voice, image generation and other OpenAI-hosted features stay with GPT. OpenAI-hosted tools, such as GPT's built-in web search, are left out of Claude's tools.
-- **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. Picker mode needs a ChatGPT sign-in, and isn't meant for ChatGPT workspaces with data-residency routing.
+- **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. The uninstall command works even when the service or its folder is gone. Picker mode needs a ChatGPT sign-in, doesn't use proxy settings, and isn't meant for ChatGPT workspaces with data-residency routing.
 - **GPT's summaries are encrypted for GPT.** If a chat that GPT compacted switches to Claude, Claude gets the messages after the summary and a note that it's unavailable.
 - **Helper agents** whose model family differs from their parent's are untested.
 - **Some request options are refused** with an error instead of being ignored: forced tool choice, output-token caps, non-JSON text formats, and `parallel_tool_calls=false` with tools.
@@ -193,7 +193,8 @@ Run the commands below from the downloaded folder (`~/Library/Application Suppor
 - `python3 scripts/picker.py install` adds a marked `openai_base_url` line to `config.toml` in your ChatGPT profile (`~/.codex`, or `$CODEX_HOME`), pointing at the bridge with a private key in the path.
   - It first saves `config.toml` and the app's cached model list to `backups/` in the runtime folder.
   - It refuses to run if you already set `openai_base_url` yourself or the profile uses another model provider.
-- `python3 scripts/picker.py uninstall` restores `config.toml` byte for byte when nothing else in it changed. Otherwise it removes only the marked line and keeps your later edits. It also restores the cached model list.
+- `python3 scripts/picker.py uninstall` restores `config.toml` byte for byte when nothing else in it changed. Otherwise it removes only the marked line and keeps your later edits. It also restores the cached model list. If the runtime folder is gone, it still removes the marked line.
+- A `config.toml` that is a symlink, such as one kept in a dotfiles repository, stays a link; the file it points to is changed.
 - `python3 scripts/picker.py status` shows whether picker mode is on.
 
 Reopen ChatGPT after either change.
@@ -304,9 +305,11 @@ Or from a clone:
 
 ```sh
 python3 scripts/picker.py uninstall          # take Claude out of the normal picker
-python3 scripts/uninstall.py                 # stop and remove the service, keep the Claude profile
+python3 scripts/uninstall.py                 # also stop and remove the service, keep the Claude profile
 python3 scripts/uninstall.py --delete-data   # also delete the Claude profile, history and logs
 ```
+
+A chat where Claude answered may not continue on GPT once the bridge is removed, because OpenAI can't read Claude's items in it. Start a new chat for those.
 
 ## Design notes
 
@@ -324,7 +327,7 @@ python3 scripts/uninstall.py --delete-data   # also delete the Claude profile, h
 ## Development
 
 ```sh
-npm test               # 148 tests with stand-ins for Claude Code and OpenAI
+npm test               # 153 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # fifteen short checks with real Claude Code
 ```
 
