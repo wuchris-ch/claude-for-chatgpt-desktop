@@ -117,14 +117,19 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 ```mermaid
 flowchart LR
-    UI[ChatGPT window] --> Runtime[App's agent runtime]
-    Runtime -->|Responses API, HTTP or WebSocket| Bridge[Bridge on 127.0.0.1]
-    Bridge -->|GPT requests| OpenAI[OpenAI]
-    Bridge -->|stream-json| Claude[claude -p, one per thread]
-    Claude -->|MCP tool call| Bridge
-    Bridge -->|ordinary tool call| Runtime
-    Runtime --> Tools[Browser, computer control, terminal, plugins]
-    Tools -->|text and images| Runtime
+    subgraph app["ChatGPT desktop app"]
+        direction TB
+        Picker["<b>Model picker</b><br/>GPT and Claude models"]
+        Tools["<b>The app's tools</b><br/>computer use, in-app browser,<br/>terminal, plugins"]
+    end
+    Bridge["<b>Bridge</b><br/>127.0.0.1 on your Mac"]
+    OpenAI["<b>OpenAI</b><br/>with the app's own login"]
+    Claude["<b>Claude Code</b><br/>one warm claude -p per chat"]
+    Picker -->|"model request"| Bridge
+    Bridge -->|"GPT models"| OpenAI
+    Bridge -->|"Claude models"| Claude
+    Claude -.->|"tool call over MCP"| Bridge
+    Bridge -.->|"app runs it, with approval"| Tools
 ```
 
 - **One setting.** Picker mode sets `openai_base_url`, so the app's OpenAI connection goes to the bridge, which adds the Claude models to the app's model list.
