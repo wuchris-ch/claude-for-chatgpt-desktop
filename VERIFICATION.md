@@ -4,6 +4,16 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. The newest checks come first.
 
+## Release 0.3.12, checked October 15, 2026
+
+### One-time timers, continued
+
+The 0.3.11 note told only the weekly form to delete itself. The app schedules a heartbeat again after it runs, so a one-time timer written as a yearly rule for a date more than a week out would have run again a year later. The note now has every one-time heartbeat start by deleting itself, converts the local time to UTC at the offset in effect on the target date (Pacific time changes on November 1, 2026), and says a recurring monthly rule needs its hour in UTC too.
+
+A correction to 0.3.11: the run times the app stores are the rule's hour in UTC exactly. The heartbeat GPT created for 10:00 AM on November 7 is due at 10:00 UTC, which is 2:00 AM Pacific that day, not 3:00 AM.
+
+223 tests pass: 183 Node tests and 40 Python tests.
+
 ## Release 0.3.11, checked October 15, 2026
 
 ### One-time timers
