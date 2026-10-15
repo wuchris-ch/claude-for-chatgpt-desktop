@@ -9,6 +9,7 @@ import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotoc
 import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
+import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
 
 // The desktop already sized each tool result for the model. Past its own
 // per-tool limit, Claude Code saves a result to a file and tells Claude to page
@@ -84,6 +85,7 @@ export class Session {
         call = await this.matchCall(name,args,extra.signal);
         if(extra.signal.aborted)throw new Error('Tool request cancelled.');
         if(this.results.has(call.id)) return this.takeResult(call.id);
+        if(call.tool.local) return await this.runLocal(call,extra.signal);
         return await new Promise((resolve,reject)=> {
           const abort = ()=> {this.pending.delete(call.id);reject(new Error('Tool request cancelled.'));};
           extra.signal.addEventListener('abort',abort,{once:true});
@@ -105,6 +107,25 @@ export class Session {
       }
     });
     await this.mcp.connect(this.transport);
+  }
+  // A search Claude runs through the bridge. The desktop shows it like one
+  // of GPT's own searches, and Claude gets the result directly.
+  async runLocal(call,signal) {
+    this.showSearch(call);
+    // A Stop, a reset or a failure ends a running search too: Claude Code
+    // cancels its MCP call only when its own turn is interrupted.
+    this.searchAbort??=new AbortController();
+    const result=await runSearch({auth:this.searchAuth,commands:call.args,upstream:this.bridge.searchUpstream,timeoutMs:this.bridge.searchTimeoutMs,signal:AbortSignal.any([signal,this.searchAbort.signal])});
+    call.done=true;if(call.shown!=null)call.shownIn.searchDone(call.shown);
+    this.log('bridge_search',{status:result.status,commands:result.commands});
+    return {content:result.content,...(result.ok?{}:{isError:true})};
+  }
+  // Shown when Claude's message ends, before any host tool call in the same
+  // message completes the response, or when the search starts, if sooner.
+  showSearch(call) {
+    if(call.shown!=null||call.done||!this.stream||this.stream.finished)return;
+    const index=this.stream.searchStarted(searchAction(call.args));
+    if(index!=null){call.shown=index;call.shownIn=this.stream;}
   }
   async matchCall(name,args,signal) {
     // stdout and HTTP are independent transports. Either may arrive first.
@@ -161,7 +182,7 @@ export class Session {
   supersededCalls(input) {
     const stamp=this.record.historyWithoutCalls;
     if(!this.child||!stamp||!extendsHistory(input,stamp))return null;
-    const calls=this.nativeCalls.filter(c=>!this.record.delivered?.includes(c.id));
+    const calls=this.nativeCalls.filter(c=>!c.tool.local&&!this.record.delivered?.includes(c.id));
     if(!calls.length||input.some(x=>calls.some(c=>c.id===x.call_id)))return null;
     const added=historyItems(input).slice(stamp.length);
     return added.length&&added.every(isIncoming)?calls:null;
@@ -276,7 +297,11 @@ export class Session {
     // the model. A process keeps the name it started with, or its next tool
     // result would look like changed instructions and rebuild the session.
     const label=()=>this.child&&this.label?this.label:labelFor(model,this.bridge.startedModels?.get(model.slug));
-    const webSearch=this.bridge.webSearch&&offersWebSearch(body.tools);
+    // In picker mode the bridge runs Claude's searches itself, with the app's
+    // ChatGPT sign-in from this request, kept in memory only.
+    const searching=body.__bridge_search;
+    if(searching)this.searchAuth={...searching,context:searchContext(body.input)};
+    const webSearch=searching?'bridge':this.bridge.webSearch&&offersWebSearch(body.tools)?'host':false;
     let name=label(),prompt=systemPrompt(body,{name,webSearch});
     if(this.child&&this.record.instructions!==digest(prompt)){await this.reset('instructions_changed');name=label();prompt=systemPrompt(body,{name,webSearch});}
     // Stop during host tool execution has no open model HTTP stream to abort.
@@ -296,7 +321,7 @@ export class Session {
     // A new inference request with no new user message can be regeneration.
     // Exact transport retries have already been handled by the response cache.
     if(!this.child&&this.record.started&&!this.resumeItems&&!body.input.some(x=>isIncoming(x)&&!this.record.seen.includes(inputKey(x))))await this.reset('regeneration_rebuilt');
-    const tools=normalizeTools(body.tools);
+    const tools=[...normalizeTools(body.tools),...(searching?[WEB_RUN_TOOL]:[])];
     if(new Set(tools.map(t=>t.name)).size!==tools.length) throw new Error('Tool names collide after MCP name normalization.');
     this.tools=tools;
     if(tools.length&&!body.__bridge_compaction)this.record.toolSet=saveToolSet(this.bridge.stateDir,tools);
@@ -458,7 +483,7 @@ export class Session {
       // cut off by a restart in the separate-window bridge's log, where the
       // restart signalled Claude Code 2.5 s before the bridge. It records the
       // waiting call as failed.
-      else if(!this.stopping&&this.ready&&this.record.inflight&&this.nativeCalls.some(c=>c.emitted&&!this.record.delivered?.includes(c.id)))this.saveStop(CLAUDE_EXITED);
+      else if(!this.stopping&&this.ready&&this.record.inflight&&this.nativeCalls.some(c=>c.emitted&&!c.tool.local&&!this.record.delivered?.includes(c.id)))this.saveStop(CLAUDE_EXITED);
       this.log('claude_exit',{code,signal});
       this.exiting=null;this.lastUsed=Date.now();resolve();
       if(refused)this.relaunch(context);
@@ -518,7 +543,7 @@ export class Session {
         // A compaction fork lists the session's tools only so the cache matches. Nothing runs.
         const compacting=this.stream instanceof CompactionStream;
         const problem=!compacting&&cardProblem(tool,c.input);
-        this.nativeCalls.push({id:c.id,args:c.input,tool,emitted:compacting||!!problem});
+        this.nativeCalls.push({id:c.id,args:c.input,tool,emitted:compacting||!!problem||!!tool.local,message:this.messageCount});
         if(compacting) {
           this.results.set(c.id,{isError:true,content:[{type:'text',text:'Not run: the host is compacting this conversation. Reply only with the checkpoint.'}]});
           this.log('compaction_tool_refused',{name:tool.originalName});
@@ -532,6 +557,7 @@ export class Session {
     if(msg.type==='stream_event') {
       const e=msg.event;
       if(e.type==='message_start') {
+        this.messageCount=(this.messageCount??0)+1;
         this.currentText=null;this.stopReason=null;if(this.ack)this.ack.thinking='';
         // Only the last message of a compaction is the checkpoint.
         if(this.stream instanceof CompactionStream)this.stream.summary='';
@@ -551,18 +577,21 @@ export class Session {
       if(e.type==='message_delta') {this.stopReason=e.delta.stop_reason;this.usage.output_tokens=e.usage?.output_tokens??0;}
       if(e.type==='message_stop') {
         const calls=this.nativeCalls.filter(x=>!x.emitted);
+        // A search the bridge runs is a tool call too, though not the host's.
+        const acting=calls.length||this.nativeCalls.some(x=>x.tool.local&&x.message===this.messageCount);
         // Opus sometimes answers a mid-turn message only in thinking, which the
         // desktop never shows. A short thought before the next tool call is that
         // answer, so it is shown as commentary.
-        if(this.ack&&calls.length&&!this.textIndices.length) {
+        if(this.ack&&acting&&!this.textIndices.length) {
           const said=this.ack.thinking.trim();
           if(said&&said.length<=ACK_THINKING_MAX){const i=this.stream.startText();this.stream.text(i,said);this.textIndices.push(i);this.log('steering_ack_from_thinking',{chars:said.length});}
           else this.log('steering_unanswered',{thinking_chars:said.length});
         }
-        if(this.ack&&(calls.length||this.textIndices.length))this.ack=null;
+        if(this.ack&&(acting||this.textIndices.length))this.ack=null;
         // Under a JSON schema, only the validated structured value is the answer.
         for(const i of this.textIndices)this.stream.finishText(i,!calls.length&&this.stopReason!=='tool_use'&&!this.schema);
         this.textIndices=[];
+        for(const c of this.nativeCalls)if(c.tool.local&&!c.done&&!this.results.has(c.id))this.showSearch(c);
         if(calls.length)this.emitCalls(this.sequential?calls.slice(0,1):calls);
       }
     }
@@ -646,15 +675,16 @@ export class Session {
     const kill=setTimeout(()=>{if(this.child===child)child.kill('SIGKILL');},6000);kill.unref();
     this.childDone.finally(()=>{clearTimeout(term);clearTimeout(kill);});
   }
-  fail(message) {this.log('error',{message});this.stream?.fail(message);this.releaseResponse();this.stopChild('SIGTERM');}
+  fail(message) {this.log('error',{message});this.abortSearches();this.stream?.fail(message);this.releaseResponse();this.stopChild('SIGTERM');}
   // What the stopped session saw, so a resume sends only the rest. By default
   // a mid-turn message Claude Code had not yet queued is sent again on resume.
   saveStop(reason,{unseen=[...this.queued.values()].flatMap(q=>q.keys),replied=!!this.stream,...detail}={}) {
-    const sent=this.nativeCalls.filter(c=>c.emitted&&!this.record.delivered?.includes(c.id)).length;
+    const sent=this.nativeCalls.filter(c=>c.emitted&&!c.tool.local&&!this.record.delivered?.includes(c.id)).length;
     this.record.stop={reason,seen:this.pendingSeen.filter(k=>!unseen.includes(k)),sent,...detail};if(replied)this.record.lastReplyAt=Date.now();this.save();
   }
+  abortSearches() {this.searchAbort?.abort();this.searchAbort=null;}
   cancel(reason) {
-    this.log('cancel',{reason});
+    this.log('cancel',{reason});this.abortSearches();
     if(this.child&&!this.stopping&&this.record.inflight) {
       if(this.ready)this.saveStop(reason);
       // Claude Code records a turn's input just before it reports init, and a

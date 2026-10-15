@@ -80,6 +80,16 @@ for line in lines:
         continue
     skip = False
     kept.append(line)
+# A Claude model the app saved as the default would make new chats fail.
+inside = None
+for i, line in enumerate(kept):
+    if inside is None and line.lstrip().startswith('['):
+        break
+    if inside is None and re.match(r'[ \t]*model[ \t]*=[ \t]*"claude-(fable|opus|sonnet|haiku)"', line):
+        del kept[i]
+        break
+    for quote in re.findall(r'"""|\'\'\'', line):
+        inside = quote if inside is None else None if quote == inside else inside
 temporary = path + '.picker-tmp'
 if os.path.exists(temporary):
     os.unlink(temporary)

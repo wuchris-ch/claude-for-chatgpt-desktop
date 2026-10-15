@@ -83,6 +83,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 - The in-app browser, computer control, terminal, file edits, plugins and connectors, with the app's approvals and tool cards.
 - Images, edits, regenerate, helper agents, review mode, chat titles and inline visuals.
 - Chats you drag in or @-mention, messages between threads, goals and automations.
+- Web search with your ChatGPT sign-in, shown in the chat like GPT's searches, with linked sources.
 - Message Claude while it works, even mid-reply. It answers you before its next step and carries on.
 - Stop, then continue where it left off.
 - A question card the app can't show goes back to Claude with the reason, so it asks in a form you can see.
@@ -101,12 +102,12 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 201 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 218 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
 - **macOS only.** Tested with ChatGPT 26.1007.71326 (Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.300 and Node.js 24.21. A later app or Claude Code release can need an update here.
-- **Local tasks only.** Cloud tasks, image generation and other OpenAI-hosted features stay with GPT. Voice conversations run on OpenAI's voice model, which hands tasks to the selected Claude model. OpenAI-hosted tools, such as GPT's built-in web search, are left out of Claude's tools.
+- **Local tasks only.** Cloud tasks, image generation and other OpenAI-hosted features stay with GPT. Voice conversations run on OpenAI's voice model, which hands tasks to the selected Claude model. Other tools that run on OpenAI's servers are left out of Claude's tools.
 - **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. The setting is in the shared `~/.codex/config.toml`, so the Codex CLI and IDE extension also go through the bridge. The uninstall command works even when the service or its folder is gone. Picker mode needs a ChatGPT sign-in, doesn't use proxy settings, and isn't meant for ChatGPT workspaces with data-residency routing.
 - **GPT's summaries are encrypted for GPT.** If a chat that GPT compacted switches to Claude, Claude gets the messages after the summary and a note that it's unavailable.
 - **Helper agents** whose model family differs from their parent's are untested.
@@ -244,7 +245,15 @@ The key is stored only in the service definition, `~/Library/LaunchAgents/<label
 </details>
 
 <details>
-<summary>Web search (opt-in, separate window)</summary>
+<summary>Web search</summary>
+
+In the picker, Claude searches the web whenever the app's web search is on, which follows your ChatGPT settings (`web_search` in `~/.codex/config.toml`: cached by default, or live).
+
+- Claude gets a `web_run` tool with the same commands as the app's own: searching, opening and finding text in pages, plus finance, weather, sports and time.
+- The bridge sends each search to OpenAI's search endpoint (`https://chatgpt.com/backend-api/codex/alpha/search`) with the sign-in the app sent with that request: only the `Authorization`, `ChatGPT-Account-Id` and `originator` headers, to that one URL, with redirects refused. Like the app, it adds your last two messages and up to about 1,000 tokens of the reply between them, for context.
+- The sign-in stays in memory. The bridge logs only status codes and command types.
+
+The separate window needs it turned on:
 
 ```sh
 python3 scripts/setup.py --web-search

@@ -86,6 +86,47 @@ class PickerTests(unittest.TestCase):
         self.assertIn('[tui]\nx = 1', result)
         self.assertIn('# a comment the user wrote', result)
 
+    def test_uninstall_puts_back_the_default_model_when_a_claude_model_was_picked(self):
+        self.run_picker('install')
+        config = self.codex/'config.toml'
+        # The app saves the model and effort last picked.
+        config.write_text(config.read_text().replace('model = "gpt-6-astra"', 'model = "claude-haiku"').replace('effort = "high"', 'effort = "max"')+'\n[profiles.work]\nmodel = "claude-opus"\n')
+        self.run_picker('uninstall')
+        result = config.read_text()
+        self.assertTrue(result.startswith('model = "gpt-6-astra"\nmodel_reasoning_effort = "high"\n# a comment the user wrote\n'), result)
+        self.assertNotIn('openai_base_url', result)
+        self.assertIn('[profiles.work]\nmodel = "claude-opus"', result)
+
+    def test_uninstall_removes_a_claude_default_that_had_no_earlier_default(self):
+        (self.codex/'config.toml').write_text('approval_policy = "never"\n\n[features]\ngoals = true\n')
+        self.run_picker('install')
+        config = self.codex/'config.toml'
+        config.write_text('model = "claude-sonnet"\nmodel_reasoning_effort = "xhigh"\n'+config.read_text())
+        self.run_picker('uninstall')
+        self.assertEqual(config.read_text(), 'approval_policy = "never"\n\n[features]\ngoals = true\n')
+
+    def test_a_claude_default_in_the_backup_is_not_restored(self):
+        # An older uninstall left a Claude default, then picker mode was installed again.
+        config = self.codex/'config.toml'
+        config.write_bytes(CONFIG.replace(b'gpt-6-astra', b'claude-haiku'))
+        self.run_picker('install')
+        self.run_picker('uninstall')
+        self.assertTrue(config.read_text().startswith('model_reasoning_effort = "high"\n# a comment'), config.read_text())
+        self.run_picker('install')
+        config.write_text(config.read_text().replace('effort = "high"', 'effort = "max"').replace('# a comment', 'model = "claude-opus"\n# a comment'))
+        self.run_picker('uninstall')
+        self.assertTrue(config.read_text().startswith('# a comment the user wrote\n'), config.read_text())
+
+    def test_a_model_line_inside_a_multi_line_string_is_left_alone(self):
+        text = 'developer_instructions = """\nmodel = "claude-opus"\n"""\nmodel = "claude-haiku"\n\n[features]\n'
+        self.assertEqual(picker.reset_claude_default(text, 'model = "gpt-6-astra"\n'),
+                         ('developer_instructions = """\nmodel = "claude-opus"\n"""\nmodel = "gpt-6-astra"\n\n[features]\n', 'gpt-6-astra'))
+        self.assertEqual(picker.reset_claude_default('model = "claude-3-7-sonnet"\n'), ('model = "claude-3-7-sonnet"\n', None))
+
+    def test_uninstall_keeps_a_gpt_default_picked_after_install(self):
+        self.assertEqual(picker.reset_claude_default('model = "gpt-6.1-sol"\n', 'model = "gpt-6-astra"\n'), ('model = "gpt-6.1-sol"\n', None))
+        self.assertEqual(picker.reset_claude_default('model = "claude-opus"'), ('', ''))
+
     def test_uninstall_after_the_runtime_folder_is_gone_still_removes_the_setting(self):
         self.run_picker('install')
         (self.codex/'models_cache.json').write_text('{"models":[{"slug":"gpt-6-astra"},{"slug":"claude-opus"}]}')

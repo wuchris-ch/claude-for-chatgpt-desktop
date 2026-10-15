@@ -48,11 +48,13 @@ export function withClaudeModels(list,models) {
 // Prepares the input of a GPT-bound request. A Claude checkpoint becomes its
 // plain summary, because only the bridge can open it, and items Claude wrote
 // lose their bridge-made ids, which OpenAI may otherwise look up in storage
-// and reject. Returns null when nothing changed.
+// and reject. A search Claude ran through the bridge is left out: OpenAI has
+// no record of it, and Claude's own messages carry what it found.
+// Returns null when nothing changed.
 export function prepareForOpenAI(input,token) {
   if(!Array.isArray(input))return null;
   let checkpoints=0,ids=0;
-  const out=input.map(x=>{
+  const out=input.filter(x=>!(x?.type==='web_search_call'&&isBridgeId(x.id)&&++ids)).map(x=>{
     if(['compaction','context_compaction'].includes(x?.type)&&String(x.encrypted_content??'').startsWith(BRIDGE_CHECKPOINT)) {
       checkpoints++;
       return {type:'message',role:'user',content:[{type:'input_text',text:checkpointText(x.encrypted_content,token)}]};

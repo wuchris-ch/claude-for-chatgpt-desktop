@@ -174,8 +174,12 @@ function agentMessageText(item) {
 }
 const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])])) : value;
+// A search the bridge ran for Claude is display only: Claude Code has the
+// call and its result, and history matching does not depend on whether the
+// desktop keeps the item.
+export const isBridgeSearch = item => item.type === 'web_search_call' && isBridgeId(item.id);
 export function semantic(item) {
-  if (['reasoning','compaction_trigger'].includes(item.type) || item.type==='message'&&['system','developer'].includes(item.role)) return null;
+  if (['reasoning','compaction_trigger'].includes(item.type) || item.type==='message'&&['system','developer'].includes(item.role) || isBridgeSearch(item)) return null;
   const {id, status, phase, channel, internal_chat_message_metadata_passthrough, ...value} = item;
   if(value.type==='message')value.content=contentBlocks(value.content);
   if(isResult(value))value.output=contentBlocks(value.output);
@@ -210,7 +214,7 @@ export function newNotes(input, stamp) {
 // never saw. Reasoning items are encrypted for GPT and are left out.
 export function otherModelTurns(input, stamp) {
   const since = input.slice(historyEnd(input, stamp));
-  return since.some(x => !isIncoming(x) && !isDeveloper(x) && !isHostCall(x) && !['reasoning', 'compaction_trigger'].includes(x.type)) ? since : null;
+  return since.some(x => !isIncoming(x) && !isDeveloper(x) && !isHostCall(x) && !isBridgeSearch(x) && !['reasoning', 'compaction_trigger'].includes(x.type)) ? since : null;
 }
 export const OTHER_MODEL_NOTE = '<other_model_turns>Another model continued this conversation after your last turn. Its messages and tool activity follow as history, then the new message.</other_model_turns>';
 // What the desktop added after a stopped turn that its native session never
@@ -230,7 +234,7 @@ export function afterStop(input, stamp, seen = [], delivered = []) {
 export function afterWithdrawn(input, stamp, seen = []) {
   if (!stamp || !extendsHistory(input, stamp)) return null;
   const added = input.slice(historyEnd(input, stamp));
-  if (!added.every(x => isIncoming(x) || isDeveloper(x)) || !added.some(x => isIncoming(x) && !seen.includes(inputKey(x)))) return null;
+  if (!added.every(x => isIncoming(x) || isDeveloper(x) || isBridgeSearch(x)) || !added.some(x => isIncoming(x) && !seen.includes(inputKey(x)))) return null;
   return added;
 }
 // Why a turn ended unfinished, besides a Stop. An API error (an overload, a
@@ -340,13 +344,17 @@ export function offersWebSearch(tools = []) {
   if (exec) return String(exec.description ?? '').includes('`web__run`');
   return normalizeTools(tools.filter(t => ['function', 'custom', 'namespace'].includes(t.type))).some(t => t.name === 'web_run');
 }
-// name is the selected model's display name. webSearch says whether the
-// bridge relays the desktop's standalone web search (opt-in).
+// name is the selected model's display name. webSearch is 'host' when the
+// bridge relays the desktop's standalone web search (opt-in, separate
+// window), 'bridge' when the bridge runs Claude's searches itself (picker
+// mode, where the app gives GPT its hosted search), or false.
 export function systemPrompt(body, {name, webSearch = false}) {
   if(body.__bridge_compaction)return `You are the context compaction component for ${name}. Create a precise continuation checkpoint from the supplied conversation. `+CHECKPOINT_RULES;
   const developers = body.input.slice(0, leadingEnd(body.input));
   const exec=(body.tools??[]).find(t=>t.name==='exec'&&t.type==='custom');
-  const search=!webSearch?'':exec
+  const search=!webSearch?'':webSearch==='bridge'
+    ? 'Web search is the top-level web_run tool, a direct tool rather than one inside exec. It searches the web with the user\'s ChatGPT sign-in, and the user sees each search in the conversation. '
+    : exec
     ? 'Web search is available inside exec as tools.web__run, the host standalone OpenAI search service; its exec documentation lists the commands (search_query, open, find and others). There is no top-level web_run tool. '
     : 'Web search is the web_run tool, the host standalone OpenAI search service.';
   const tools=exec?search+'The exec tool accepts JavaScript in its input property.'+execOnlyNote(exec):search;
@@ -600,8 +608,23 @@ export class ResponseStream {
     this.send('response.output_item.added', {output_index: index, item});
     this.send('response.output_item.done', {output_index: index, item});
   }
+  // A search the bridge runs for Claude, shown as the desktop shows GPT's.
+  searchStarted(action) {
+    const item = {type: 'web_search_call', id: uid('ws'), status: 'in_progress', action};
+    const index = this.output.push(item)-1;
+    this.send('response.output_item.added', {output_index: index, item});
+    return index;
+  }
+  searchDone(index) {
+    const item = this.output[index];
+    if (item?.status !== 'in_progress') return;
+    item.status = 'completed';
+    this.send('response.output_item.done', {output_index: index, item});
+  }
   complete(usage = {input_tokens:0,output_tokens:0,total_tokens:0}) {
     if(this.finished)return;
+    // A search still running when the response ends with a host tool call.
+    for(const [i,x] of this.output.entries())if(x.type==='web_search_call'&&x.status==='in_progress')this.searchDone(i);
     this.send('response.completed', {response: this.response('completed', usage)});this.onComplete?.(this.frames.join(''));this.end();
   }
   fail(message) {
@@ -616,6 +639,7 @@ export class CompactionStream extends ResponseStream {
   text(index,delta) {this.summary+=delta;}
   finishText() {}
   tool() {throw new Error('Compaction cannot execute tools.');}
+  searchStarted() {return null;}
   // The desktop summarizes a compacted window with the last assistant message
   // in its history and drops the compaction item. With the item alone, that was
   // the previous turn's final answer and the checkpoint never reached the next

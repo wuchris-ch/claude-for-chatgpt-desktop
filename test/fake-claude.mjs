@@ -115,6 +115,14 @@ input.on('line',async line=>{
   send({type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'toolu_ghost',is_error:true,content:'No such tool available: web_run'}]}});
   text('Recovered');return;
  }
+ // A web search through the bridge's own tool, optionally with a host call in the same message.
+ if(request.includes('web-search-tool')) {
+  const args={search_query:[{q:'bridge fixture query'}]},exec={input:'text("side");'},both=request.includes('with-exec');start();
+  assistant([{type:'tool_use',id:'toolu_search',name:'mcp__chatgpt__web_run',input:args},...(both?[{type:'tool_use',id:'toolu_side',name:'mcp__chatgpt__exec',input:exec}]:[])]);
+  event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
+  busy=true;const [found,side]=await Promise.all([client.callTool({name:'web_run',arguments:args}),both?client.callTool({name:'exec',arguments:exec}):null]);busy=false;
+  text('SEARCHED '+JSON.stringify({found,side,tools:listed.tools.map(t=>t.name),prompt:fs.readFileSync(arg('--system-prompt-file'),'utf8').includes('top-level web_run tool')}));return;
+ }
  if(request.includes('two-tools')) {
   const first={input:'text("one");'},second={input:'text("two");'};start();
   assistant([{type:'tool_use',id:'toolu_one',name:'mcp__chatgpt__exec',input:first},{type:'tool_use',id:'toolu_two',name:'mcp__chatgpt__exec',input:second}]);

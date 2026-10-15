@@ -6,7 +6,7 @@ import {timingSafeEqual} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
 import {Session} from './session.mjs';
-import {createSearchHandler} from './search.mjs';
+import {createSearchHandler, pickerSearch} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
 import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions} from './protocol.mjs';
 import {loadModels, effortFor, labelFor} from './models.mjs';
@@ -79,7 +79,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   const cacheTimer=setInterval(()=>{try{pruneResponseCache(cacheDir);pruneToolSets(toolSetDir);}catch(error){log('cache_cleanup_error',{message:error.message});}},900000);cacheTimer.unref();
   // resolvedModels maps a catalog slug to the model Claude Code last started
   // for it, so later processes pin aliases to the same version.
-  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,exitGraceMs,initWaitMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
+  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,searchUpstream,searchTimeoutMs,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,exitGraceMs,initWaitMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
   // startedModels keeps the same record across restarts, for the names the
   // picker shows only. Pinning starts empty, so an alias still follows Claude
   // Code to a new release after a restart.
@@ -135,9 +135,13 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     const kind=metadata.request_kind==='compaction'||body.input.at(-1)?.type==='compaction_trigger'?'compaction':metadata.request_kind??'turn';
     // In picker mode the tool list is the one GPT gets, which can include
     // tools OpenAI runs on its servers. Claude cannot use those.
+    // GPT's web search is one of them. Where the app offers it, Claude gets
+    // the bridge's own search tool, which uses the same ChatGPT sign-in.
+    let searching=null;
     if(req.gateway&&Array.isArray(body.tools)) {
       const hosted=body.tools.filter(t=>!['function','custom','namespace'].includes(t.type));
       if(hosted.length){body={...body,tools:body.tools.filter(t=>!hosted.includes(t))};log('hosted_tools_omitted',{types:hosted.map(t=>t.type)});}
+      searching=pickerSearch(hosted,req.headers,token);
     }
     validateRequestOptions(kind==='compaction'?{...body,tools:[]}:body);
     effortFor(model,body.reasoning?.effort);
@@ -156,6 +160,8 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         :'<context_checkpoint>Earlier conversation was compacted by another model. Its summary is encrypted for that model and is not available here; the messages kept after it follow. Ask the user if something important is missing.</context_checkpoint>'}]})};
     if(kind==='compaction') {body.__bridge_compaction=true;body.tools=[];body.__bridge_turn_key=[thread,metadata.context_window_id??'default','turn',checkpointKey].join(':');}
     body.__bridge_model=model;
+    // Kept in memory with the request only, never written to disk.
+    if(searching&&kind!=='compaction')body.__bridge_search={...searching,thread,model:body.model};
     const key=[thread,metadata.context_window_id??'default',kind,checkpointKey].join(':');
     bridge.log('request',{model:model.slug,request_kind:kind,picker:req.gateway??false,window:metadata.window_number,tools:body.tools?.length,items:body.input.length});
     if(!bridge.sessions.has(key))bridge.sessions.set(key,new Session(bridge,key));

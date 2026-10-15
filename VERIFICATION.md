@@ -2,7 +2,42 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, and 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. The newest checks come first.
+
+## Release 0.3.9, checked October 14, 2026
+
+### Web search in the picker
+
+In picker mode the app gives a Claude request GPT's tool list, where web search is OpenAI's hosted `web_search` tool. It runs on OpenAI's servers, so the bridge had left it out and Claude had no web search. The app's own standalone search, `web.run`, is offered only for models flagged for it, which the Claude entries are not.
+
+How the app's runtime calls that search, from the Codex source at tag `rust-v0.162.0-alpha.17.2` (`codex-api/src/search.rs`, `ext/web-search/src/tool.rs`, `history.rs`, `extension.rs`): a POST to `alpha/search` with `id` (the root thread id), `model`, `input` (the previous and current user messages and up to 1,000 tokens of assistant text between them), `commands` (the tool arguments, parsed and written out again, so unknown keys and nulls drop), `settings` (`allowed_callers: ["direct"]`, `external_web_access` from the web search mode: false when cached, the default, true when live, `"indexed"` when indexed, plus any location, context size or domain filter from the config) and `max_output_tokens` 10000. The model gets the response's `output` text verbatim as the tool result.
+
+The bridge now does the same itself when a picker request offers the hosted tool and carries the app's ChatGPT sign-in. Claude gets a `web_run` tool with the same commands; each call goes to the search endpoint with that sign-in, kept in memory with the request. Each search is sent to the app as a `web_search_call` item, the kind GPT's searches produce, with the same labels as the app's own: the queries, else the page opened or searched. The item is shown when Claude's message ends, because a host tool call in the same message completes the response before Claude Code starts the search. History matching ignores these items, whether or not the app keeps them, and GPT-bound requests leave them out, since OpenAI has no record of them.
+
+Live checks on October 14, 2026, through the app's own runtime (0.162.0-alpha.17.2) and the installed bridge, with the default cached search mode:
+
+- `codex exec` on `claude-sonnet`: Sonnet searched, then opened a result by its reference id, both HTTP 200, and answered with linked sources. The endpoint accepted the Claude model name.
+- A search turn and a resumed follow-up: the follow-up request carried both search items (10 input items), resumed the native session without a rebuild or an other-model note, and Sonnet described its earlier searches and the page it used. The runtime's rollout stored the items with the bridge's ids and labels.
+- The app-server, which feeds the app's window: a Haiku turn produced three `webSearch` items (a search with two queries, then two opened pages) and a cited answer.
+
+New fixture tests: the request body and headers against a stand-in endpoint, the sign-in absent from logs and every file the bridge writes, a search shown while a host tool call in the same message completes the response, the next turn resuming with or without the items, errors returned to Claude as tool errors, no tool without the app's web search or sign-in, GPT requests without the items, unknown commands and nulls left out, the labels, the conversation tail and the settings for each mode.
+
+### A Claude default model after uninstall
+
+Picking a model in the app saves it as the default, `model = "..."` in `~/.codex/config.toml`; a real test left `claude-haiku` there. Uninstall then kept the line, since the file no longer matched the backup, so new chats, the Codex CLI and the IDE extension would ask OpenAI for a model it does not have. Uninstall now puts back the default and effort from before install, or removes the line if there was none. The fallback in `install.sh`, used when the runtime folder is gone, removes it. Five new tests cover the backup, no earlier default, a Claude default in the backup, a multi-line string and a GPT default picked after install; the fallback was run against a throwaway home folder.
+
+### Automated tests in 0.3.9
+
+A review of the change against the Codex source found no serious defects and six smaller ones, all fixed with tests:
+
+- The conversation tail kept Claude's text after the current message and dropped a user message that starts with a tag, such as `<div>`. It now ends at the current message, leaves out only the notes the app itself adds (its own list), and includes plain-text agent messages, as the app does.
+- A Stop did not end a running search: Claude Code cancels its call only when its own turn is interrupted. Stopping, resetting or failing a session now aborts its searches. The new test fails without this.
+- When the app drops a response's host calls to send a new message, the bridge also marked Claude's searches as dropped. They are left alone now.
+- A reply to a mid-turn message that Claude wrote only in its thinking is shown when its next step is a search, as it is before a host tool call.
+- A Claude default in the backup itself, as an older uninstall left it, came back on uninstall. It is now removed, a model line inside a multi-line string is left alone, and only the bridge's own model names count, here and in the `install.sh` fallback.
+- A failure to save the separate window's header names file returned the raw error instead of the generic message.
+
+218 tests pass: 179 Node tests and 39 Python tests.
 
 ## Release 0.3.8, checked October 14, 2026
 
