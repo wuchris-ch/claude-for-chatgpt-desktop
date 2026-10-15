@@ -127,6 +127,32 @@ class PickerTests(unittest.TestCase):
         self.assertEqual(picker.reset_claude_default('model = "gpt-6.1-sol"\n', 'model = "gpt-6-astra"\n'), ('model = "gpt-6.1-sol"\n', None))
         self.assertEqual(picker.reset_claude_default('model = "claude-opus"'), ('', ''))
 
+    def test_a_claude_opus_default_the_app_saved_leaves_a_gpt_default_on_every_uninstall_path(self):
+        # As the app writes it when Claude Opus is picked in the composer.
+        picked = lambda text: text.replace('model = "gpt-6-astra"\nmodel_reasoning_effort = "high"', 'model = "claude-opus"\nmodel_reasoning_effort = "high"')
+        root_model = lambda text: next((line for line in text.split('\n[')[0].splitlines() if line.startswith('model =')), None)
+        config = self.codex/'config.toml'
+        cases = {'backup with a GPT default': CONFIG.decode(), 'backup without a default': CONFIG.decode().replace('model = "gpt-6-astra"\n', '')}
+        for name, before in cases.items():
+            with self.subTest(name):
+                config.write_text(before)
+                self.run_picker('install')
+                config.write_text(picked(config.read_text()) if 'gpt-6-astra' in before else 'model = "claude-opus"\n'+config.read_text())
+                self.run_picker('uninstall')
+                result = config.read_text()
+                self.assertNotIn('openai_base_url', result)
+                self.assertEqual(root_model(result), 'model = "gpt-6-astra"' if 'gpt-6-astra' in before else None, result)
+        with self.subTest('runtime folder gone'):
+            config.write_bytes(CONFIG)
+            self.run_picker('install')
+            config.write_text(picked(config.read_text()))
+            for name in ['picker.json', 'gateway-key']:
+                (self.runtime/name).unlink()
+            self.run_picker('uninstall')
+            result = config.read_text()
+            self.assertNotIn('openai_base_url', result)
+            self.assertIsNone(root_model(result), result)
+
     def test_uninstall_after_the_runtime_folder_is_gone_still_removes_the_setting(self):
         self.run_picker('install')
         (self.codex/'models_cache.json').write_text('{"models":[{"slug":"gpt-6-astra"},{"slug":"claude-opus"}]}')

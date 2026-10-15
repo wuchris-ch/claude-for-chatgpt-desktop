@@ -102,7 +102,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 218 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 223 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
@@ -332,7 +332,7 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 - **Patches and host habits.** GPT's `apply_patch` output is constrained by a grammar that MCP cannot carry, so the bridge adds a written patch format guide, plus notes on escaping inside JavaScript and on the shared output budget of an `exec` cell. It also passes on host habits found by benchmarking: render PDFs to images in a temporary folder, keep long jobs in the foreground, and avoid `rm -rf`, which the app refuses.
 - **Sessions.** Between user turns Claude Code resumes the saved session. Before resuming, the bridge checks the app's transcript against what the session saw. Edits, undo, regeneration and unexpected failures rebuild from the app's transcript. A turn stopped by the user, cut off by a bridge restart, ended by an API error such as an overload or a usage limit, or cut off when Claude Code exits while the app runs a tool resumes its native session; a Stop before Claude Code has started waits for it to start, so the message is recorded once. When the user edits or withdraws a stopped message whose turn sent no tool call, Claude Code resumes at the end of the last completed turn and drops the stopped one. While Claude thinks or writes a long tool call, the bridge sends a no-op event every 10 seconds so the app's stall timer does not fire.
 - **Model switching.** Switching Claude models between turns resumes the same native session on the new model; that first request cannot reuse the previous model's cache. If GPT answered in between, its messages and tool activity are passed to the resumed session as history. A compaction keeps the model the session ran on, so its cache still applies.
-- **WebSocket relay.** The bridge connects to OpenAI during the app's handshake, so the headers the app reads from it (turn routing, server model) arrive unchanged, then routes each `response.create` by model. For Claude it rebuilds the full input from the increments the app sends after the first request, answers prewarm requests without inference, and treats `response.interrupt` as a Stop. A Claude compaction summary is a sealed item only the bridge can open, so it is turned back into text before a GPT request leaves for OpenAI.
+- **WebSocket relay.** The bridge connects to OpenAI during the app's handshake, so the headers the app reads from it (turn routing, server model) arrive unchanged, then routes each `response.create` by model. For Claude it rebuilds the full input from the increments the app sends after the first request, answers prewarm requests without inference, and treats `response.interrupt` as a Stop. OpenAI closes connections that sit idle, as this one does while Claude answers; the app's side then stays open for Claude, and a GPT request on it makes the app reconnect. A Claude compaction summary is a sealed item only the bridge can open, so it is turned back into text before a GPT request leaves for OpenAI.
 
 </details>
 

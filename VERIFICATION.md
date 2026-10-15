@@ -4,6 +4,41 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. The newest checks come first.
 
+## Release 0.3.10, checked October 15, 2026
+
+### OpenAI closing the connection while Claude has it
+
+A user reported seeing "stream disconnected before completion: websocket closed by server before response.completed" often enough to uninstall. It was not reproduced here, and the report has no other details, so this release hardens the path that error can come from rather than fixing a confirmed cause.
+
+What the error means, from the Codex source used by the app's runtime (`codex-api/src/endpoint/responses_websocket.rs`, `core/src/responses_retry.rs`): the app received a WebSocket Close while it waited for `response.completed`. The runtime retries up to five times on a new connection and hides the first retry notice, then falls back to HTTPS. A visible notice therefore means at least two failed attempts in a row.
+
+In picker mode the app's WebSocket ends at the bridge, which opens a matching connection to OpenAI during the handshake. Claude requests never use that connection, so it sits idle while Claude answers. Before this release, when OpenAI closed it, the bridge closed the app's connection too, after any Claude response in progress. A close that arrived as the app sent its next request failed that request. Any message OpenAI sent on its own was passed to the app, which would have read it as part of Claude's next response.
+
+Measurements on October 15, 2026, through the app's runtime (0.162.0-alpha.17.2) and the installed 0.3.9 bridge:
+
+- The app's own logs for October 10 to 15 show this error twice, both on GPT connections straight to OpenAI without the bridge, and both retried without a notice.
+- A 7-minute Claude turn with long shell commands: OpenAI kept the idle connection open, with a ping about every 20 seconds, and the turn finished without a retry.
+- Two Claude turns 65 minutes apart on one connection: OpenAI closed the idle connection after 41 minutes with code 1012 (service restart) and no reason. The bridge closed the app's side, the app opened a new connection for the second turn, and the turn finished without a retry or notice.
+
+What changed:
+
+- When OpenAI closes a connection that Claude was last asked on, the app's side stays open and Claude keeps answering on it. A GPT request on it afterwards makes the bridge close it, and the app sends the request again on a new connection, which is the retry it hides. A connection where GPT was last asked, or nothing yet, follows OpenAI's close as before.
+- A message from OpenAI on a Claude connection, with no GPT request waiting, is dropped and logged instead of reaching the app.
+- Each close from OpenAI is logged with its code, reason and the connection's age, so a report like this one can be traced.
+
+A live check of the new code through the app's runtime, with a test copy of the bridge and a stand-in OpenAI that closes on demand: a Claude turn, then a close with code 1012, then a second Claude turn on the same connection without a new handshake, then a GPT turn that reconnected once without a notice and sent the full request.
+
+Window mode cannot produce this error through the bridge. Its provider sets `supports_websockets = false`, which turns off the runtime's WebSocket transport (`core/src/client.rs`), and the bridge answers a WebSocket outside picker mode with a 404.
+
+### Automated tests in 0.3.10
+
+- OpenAI closing its side after a Claude response and in the middle of one, a GPT request afterwards, a message OpenAI sends on its own between and during Claude responses, and connections that follow OpenAI's close: before any request, after GPT, and in the middle of a GPT response, which also clears the count of GPT requests in flight.
+- Uninstall when the app saved `claude-opus` as the default, on each path: the GPT default from before install comes back, or the line is removed when there was none or the runtime folder is gone, so the app uses its own GPT default. The app's list of recent models needs no change: it leaves out models the model list no longer has.
+
+A review of the change found that the first version also kept a connection open when OpenAI closed it before any request, which would have turned a quiet reconnect at startup into a failed first GPT request. Fixed, with a test that fails on the first version.
+
+223 tests pass: 183 Node tests and 40 Python tests.
+
 ## Release 0.3.9, checked October 14, 2026
 
 ### Web search in the picker

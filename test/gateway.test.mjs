@@ -19,7 +19,7 @@ const events=text=>text.split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSO
 
 // A stand-in for OpenAI's Codex backend: HTTP routes and a Responses WebSocket.
 async function fakeOpenAI(t) {
-  const seen={http:[],ws:[],handshakes:[],paths:[]};
+  const seen={http:[],ws:[],handshakes:[],paths:[],sockets:[]};
   const server=http.createServer(async(req,res)=>{
     const chunks=[];for await(const c of req)chunks.push(c);
     const body=Buffer.concat(chunks);seen.http.push({method:req.method,url:req.url,headers:req.headers,body});
@@ -36,12 +36,14 @@ async function fakeOpenAI(t) {
   server.on('upgrade',(req,socket,head)=>{
     seen.handshakes.push(req.headers);seen.paths.push(req.url);
     if(req.headers.authorization==='Bearer expired'){socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{"e":"exp"}');return;}
-    wss.handleUpgrade(req,socket,head,ws=>ws.on('message',data=>{
+    wss.handleUpgrade(req,socket,head,ws=>{seen.sockets.push(ws);ws.on('message',data=>{
       const message=JSON.parse(data.toString());seen.ws.push(message);
       ws.send(JSON.stringify({type:'codex.response.metadata',headers:{'x-models-etag':'W/"models-1"'}}));
       ws.send(JSON.stringify({type:'response.created',response:{id:'resp_gpt_ws'}}));
+      // A response still running, for a close in the middle of it.
+      if(JSON.stringify(message).includes('hold-gpt'))return;
       ws.send(JSON.stringify({type:'response.completed',response:{id:'resp_gpt_ws',output:[]}}));
-    }));
+    });});
   });
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   t.after(async()=>{for(const c of wss.clients)c.terminate();server.closeAllConnections();await new Promise(r=>server.close(r));});
@@ -229,6 +231,103 @@ test('a message sent with the interrupt, in the same packet, starts the next Cla
  assert.equal(c.received.some(x=>x.type==='error'),false);
  c.ws.close();
 });
+// OpenAI closes connections that sit idle, as they do while Claude answers.
+const until=async(check,what)=>{for(let i=0;i<400;i++){if(check())return;await new Promise(r=>setTimeout(r,10));}assert.fail('Timed out waiting for '+what);};
+const closed=ws=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('The app connection stayed open')),3000);ws.once('close',(code,reason)=>{clearTimeout(timer);resolve({code,reason:reason.toString()});});});
+test('OpenAI closing its side leaves a Claude connection open, and a GPT request after it gets a new connection',async t=>{
+ const {openai,bridge,app,logs}=await setup(t);
+ const url=bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses';
+ const c=await connect(url,app);
+ const base={type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-idle'}};
+ c.ws.send(JSON.stringify({...base,input:[user('echo-input one','u1')]}));
+ const first=await c.next('response.completed');
+ openai.seen.sockets[0].close(1000,'idle');
+ await until(()=>logs.some(x=>x.event==='gateway_ws_openai_closed'),'the close log');
+ assert.equal(logs.find(x=>x.event==='gateway_ws_openai_closed').kept_open,true);
+ c.ws.send(JSON.stringify({...base,previous_response_id:first.response.id,input:[user('echo-input two','u2')]}));
+ assert.match(JSON.stringify((await c.next('response.completed',2)).response.output),/ECHO.*two/);
+ assert.equal(c.ws.readyState,WebSocket.OPEN);
+ const gone=closed(c.ws);
+ c.ws.send(JSON.stringify({type:'response.create',model:'gpt-fixture',input:[user('hi','u3')],tools,stream:true}));
+ assert.equal((await gone).code,1000);
+ assert.equal(c.received.some(x=>x.type==='error'),false);assert.equal(openai.seen.ws.length,0);
+ const again=await connect(url,app);
+ again.ws.send(JSON.stringify({type:'response.create',model:'gpt-fixture',input:[user('hi','u3')],tools,stream:true}));
+ await again.next('response.completed');assert.equal(openai.seen.ws.length,1);
+ assert.equal((await(await fetch(bridge.url+'/health',{headers:{Authorization:'Bearer fixture-secret'}})).json()).active_relays,0);
+ again.ws.close();
+});
+
+test('OpenAI closing its side while Claude answers does not cut the answer off',async t=>{
+ const {openai,bridge,app}=await setup(t);
+ const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',app);
+ c.ws.send(JSON.stringify({type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-mid'},input:[user('silent-think-400','u1')]}));
+ await c.next('response.created');
+ openai.seen.sockets[0].close(1001,'going away');
+ assert.match(JSON.stringify((await c.next('response.completed')).response.output),/AWAKE/);
+ await new Promise(r=>setTimeout(r,100));
+ assert.equal(c.ws.readyState,WebSocket.OPEN);assert.equal(c.received.some(x=>x.type==='error'),false);
+ c.ws.close();
+});
+
+test('a message OpenAI sends on its own to a Claude connection does not reach the app',async t=>{
+ const {openai,bridge,app,logs}=await setup(t);
+ const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',app);
+ const base={type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-stray'}};
+ c.ws.send(JSON.stringify({...base,input:[user('echo-input one','u1')]}));
+ const first=await c.next('response.completed');
+ openai.seen.sockets[0].send(JSON.stringify({type:'error',status:400,error:{code:'websocket_connection_limit_reached',message:'limit'}}));
+ await until(()=>logs.some(x=>x.event==='gateway_ws_openai_message_dropped'),'the drop log');
+ assert.equal(logs.find(x=>x.event==='gateway_ws_openai_message_dropped').type,'error');
+ c.ws.send(JSON.stringify({...base,previous_response_id:first.response.id,input:[user('echo-input two','u2')]}));
+ const second=await c.next('response.completed',2);
+ // And in the middle of a Claude response.
+ c.ws.send(JSON.stringify({...base,previous_response_id:second.response.id,input:[user('silent-think-300','u3')]}));
+ await c.next('response.created',3);
+ openai.seen.sockets[0].send(JSON.stringify({type:'error',status:500,error:{message:'stray'}}));
+ assert.match(JSON.stringify((await c.next('response.completed',3)).response.output),/AWAKE/);
+ assert.equal(c.received.some(x=>x.type==='error'),false);
+ assert.equal(logs.filter(x=>x.event==='gateway_ws_openai_message_dropped').length,2);
+ c.ws.close();
+});
+
+test('a connection follows OpenAI closing it before any request, after GPT, and in the middle of a GPT response',async t=>{
+ const {openai,bridge,app,logs}=await setup(t);
+ const url=bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses';
+ const claude=input=>JSON.stringify({type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-gpt'},input});
+ const gpt=text=>JSON.stringify({type:'response.create',model:'gpt-fixture',input:[user(text,'g1')],tools,stream:true});
+ const relays=async()=>(await(await fetch(bridge.url+'/health',{headers:{Authorization:'Bearer fixture-secret'}})).json()).active_relays;
+ // The app opens its connection at startup, before its first request.
+ const fresh=await connect(url,app);let gone=closed(fresh.ws);
+ openai.seen.sockets.at(-1).close(1008,'refused');
+ assert.deepEqual(await gone,{code:1008,reason:'refused'});
+ // Claude, then GPT, then an idle close.
+ const c=await connect(url,app);
+ c.ws.send(claude([user('echo-input one','u1')]));await c.next('response.completed');
+ c.ws.send(gpt('hi'));await c.next('response.completed',2);
+ gone=closed(c.ws);
+ openai.seen.sockets.at(-1).close(4000,'limit');
+ assert.deepEqual(await gone,{code:4000,reason:'limit'});
+ // A close while a GPT response is still running.
+ const held=await connect(url,app);
+ held.ws.send(gpt('hold-gpt'));await held.next('response.created');
+ assert.equal(await relays(),1);
+ gone=closed(held.ws);
+ openai.seen.sockets.at(-1).close(1011,'server error');
+ assert.deepEqual(await gone,{code:1011,reason:'server error'});
+ assert.equal(await relays(),0);
+ assert.deepEqual(logs.filter(x=>x.event==='gateway_ws_openai_closed').map(x=>[x.kept_open,x.gpt_pending]),[[false,0],[false,0],[false,1]]);
+ // GPT, then Claude, then an idle close: Claude still has the connection.
+ const mixed=await connect(url,app);
+ mixed.ws.send(gpt('hi'));await mixed.next('response.completed');
+ mixed.ws.send(claude([user('echo-input two','u2')]));await mixed.next('response.completed',2);
+ openai.seen.sockets.at(-1).close(1000,'idle');
+ await until(()=>logs.filter(x=>x.event==='gateway_ws_openai_closed').length===4,'the fourth close');
+ assert.equal(logs.filter(x=>x.event==='gateway_ws_openai_closed').at(-1).kept_open,true);
+ assert.equal(mixed.ws.readyState,WebSocket.OPEN);
+ mixed.ws.close();
+});
+
 test('remote compaction of a Claude thread returns one checkpoint item that GPT can then read',async t=>{
  const {openai,post}=await setup(t);
  const history=[user('remember amber pine 742','u1'),{type:'message',role:'assistant',content:[{type:'output_text',text:'ok'}]}];
