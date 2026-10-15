@@ -201,14 +201,17 @@ test('an interrupt on a Claude WebSocket response ends it as incomplete and the 
 });
 
 test('a Claude WebSocket request the app drops at once leaves no Claude process running',async t=>{
- const {bridge,app}=await setup(t);
+ const {bridge,app,logs}=await setup(t);
  for(let i=0;i<5;i++) {
   const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',app,{perMessageDeflate:false});
   c.ws.send(JSON.stringify({type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-drop-'+i},input:[user('slow-response','u1')]}));
   c.ws.terminate();
  }
  await new Promise(r=>setTimeout(r,500));
+ // A process that started before the drop is stopped once it reports init.
+ for(let i=0;i<500&&[...bridge.sessions.values()].some(s=>s.child);i++)await new Promise(r=>setTimeout(r,10));
  for(const session of bridge.sessions.values())assert.ok(!session.child,'a Claude process was left running');
+ assert.equal(logs.filter(x=>x.event==='claude_start').length,logs.filter(x=>x.event==='stopped_at_init').length);
 });
 test('a message sent with the interrupt, in the same packet, starts the next Claude response',async t=>{
  const {bridge,app}=await setup(t);

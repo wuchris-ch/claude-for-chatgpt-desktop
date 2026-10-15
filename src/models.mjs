@@ -74,7 +74,9 @@ export function labeled(models,started=new Map()) {
 // the desktop's fixed level is accepted and nothing is passed to Claude Code.
 export function effortFor(model,requested) {
   if(!model.efforts.length)return null;
-  const effort=requested??model.default_effort;
+  let effort=requested??model.default_effort;
+  // GPT's lowest levels can carry over when a thread switches to Claude.
+  if(['none','minimal'].includes(effort)&&!model.efforts.includes(effort))effort=model.efforts[0];
   if(!model.efforts.includes(effort))
     throw Object.assign(new Error(`${model.display_name} does not support ${effort} effort. Choose one of: ${model.efforts.join(', ')}.`),{statusCode:400});
   return effort;

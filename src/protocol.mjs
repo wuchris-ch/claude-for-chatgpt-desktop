@@ -1,6 +1,7 @@
 import {createHash, randomUUID, randomBytes, createCipheriv, createDecipheriv} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import {identity} from './catalog.mjs';
 
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 // Ids of items the bridge creates carry a mark that OpenAI's hex ids never
@@ -112,13 +113,22 @@ export function imageBlock(url) {
   return {type: 'image', source: {type: 'base64', media_type: match[1], data: match[2]}};
 }
 
+// An image from the user's ChatGPT files arrives as a file id that only
+// OpenAI can open. Failing on it broke the thread for Claude for good, since
+// every later request carries it, even one GPT answered first.
+const fileImageNote = id => `[An image from the user's ChatGPT files (${id}) was attached here. Claude cannot open ChatGPT files, so it is not shown. If it matters, ask the user to attach the image itself.]`;
 export function contentBlocks(content) {
   if (typeof content === 'string') return [{type: 'text', text: content}];
   return (content ?? []).map(c => {
     if (['input_text', 'output_text', 'text'].includes(c.type)) return {type: 'text', text: c.text};
+    if (c.type === 'input_image' && !c.image_url && typeof c.file_id === 'string') return {type: 'text', text: fileImageNote(c.file_id)};
     if (c.type === 'input_image') return imageBlock(c.image_url);
     if (c.type === 'image' && c.data) return {type: 'image', source: {type: 'base64', media_type: c.mimeType, data: c.data}};
-    throw new Error(`Unsupported content block: ${c.type}. The bridge will not drop content.`);
+    // GPT's refusals stay in a shared thread's history.
+    if (c.type === 'refusal') return {type: 'text', text: `[Refused: ${c.refusal ?? ''}]`};
+    // Any other part is shown as text rather than dropped or failing the
+    // thread on every request. Long values such as file data are left out.
+    return {type: 'text', text: JSON.stringify({content_part: c}, (k, v) => typeof v === 'string' && v.length > 2000 ? `[${v.length} characters left out]` : v)};
   });
 }
 
@@ -128,10 +138,27 @@ export function mcpResult(output) {
 }
 
 export const isResult = item => ['function_call_output', 'custom_tool_call_output'].includes(item.type);
+// The desktop delivers a message from another thread (send_message_to_thread,
+// a thread that create_thread or handoff_thread started) as a turn's tool
+// output: a function_call_output with name and namespace and no call_id, which
+// no call of this model made. For the receiving thread it is new input.
+// MCP apps and interactive widgets share context the same way, before a turn
+// starts (thread/inject_items): a call the desktop writes itself, named
+// untrusted_input with a call id untrusted_input_… or visualization_state_…,
+// and its output. Neither Claude nor another model made that call.
+export const isHostCall = item => item.type === 'function_call' && item.name === 'untrusted_input';
+const HOST_CALL_ID = /^(untrusted_input|visualization_state)_/;
+export const isHostOutput = item => isResult(item) && (item.call_id == null || HOST_CALL_ID.test(item.call_id));
+// Output of a tool call this conversation made.
+export const isCallResult = item => isResult(item) && !isHostOutput(item);
 // Multi-agent v2 delivers tasks and results between agents as agent_message
 // items. For the receiving agent they are new input, like a user message.
-export const isIncoming = item => item.type === 'agent_message' || (item.type === 'message' && item.role === 'user');
-export const inputKey = item => item.id ?? digest(item.content);
+export const isIncoming = item => item.type === 'agent_message' || (item.type === 'message' && item.role === 'user') || isHostOutput(item);
+export const inputKey = item => item.id ?? digest(item.content ?? item.output);
+const hostOutputText = item => {
+  const tool = item.call_id == null ? [item.namespace, item.name].filter(Boolean).join('.') || 'unknown' : 'untrusted_input';
+  return `<host_tool_output tool="${tool}">The host delivered this as the output of ${tool}, which you did not call. It is new input for you, such as a message from another task or what an app shared.`;
+};
 // The desktop adds developer notes as a thread goes on (the date, skills, the
 // open page, an image resize, an interrupted turn), and GPT reads each where it
 // appears. Only those before the conversation starts form Claude's system prompt.
@@ -183,7 +210,7 @@ export function newNotes(input, stamp) {
 // never saw. Reasoning items are encrypted for GPT and are left out.
 export function otherModelTurns(input, stamp) {
   const since = input.slice(historyEnd(input, stamp));
-  return since.some(x => !isIncoming(x) && !isDeveloper(x) && !['reasoning', 'compaction_trigger'].includes(x.type)) ? since : null;
+  return since.some(x => !isIncoming(x) && !isDeveloper(x) && !isHostCall(x) && !['reasoning', 'compaction_trigger'].includes(x.type)) ? since : null;
 }
 export const OTHER_MODEL_NOTE = '<other_model_turns>Another model continued this conversation after your last turn. Its messages and tool activity follow as history, then the new message.</other_model_turns>';
 // What the desktop added after a stopped turn that its native session never
@@ -195,6 +222,24 @@ export function afterStop(input, stamp, seen = [], delivered = []) {
   return input.slice(historyEnd(input, stamp)).filter(x =>
     isIncoming(x) ? !seen.includes(inputKey(x)) : isResult(x) ? !delivered.includes(x.call_id) : isDeveloper(x));
 }
+// When the user edits or withdraws a message that was stopped before it was
+// answered, the desktop drops the stopped turn and sends the conversation as it
+// stood before that turn plus a new message. The new items, when the request
+// is exactly that: the earlier history unchanged, then only new user or agent
+// messages and developer notes.
+export function afterWithdrawn(input, stamp, seen = []) {
+  if (!stamp || !extendsHistory(input, stamp)) return null;
+  const added = input.slice(historyEnd(input, stamp));
+  if (!added.every(x => isIncoming(x) || isDeveloper(x)) || !added.some(x => isIncoming(x) && !seen.includes(inputKey(x)))) return null;
+  return added;
+}
+// Why a turn ended unfinished, besides a Stop. An API error (an overload, a
+// usage limit, an expired login) ends the turn after Claude Code has recorded
+// its input. Claude Code can also exit on its own while the host runs a tool,
+// as when a restart signals it before the bridge.
+export const API_FAILED = 'api_error';
+export const CLAUDE_EXITED = 'claude_exited';
+const RESTART = 'Bridge shutting down.';
 // Claude Code marks a stopped turn's unanswered tool calls as rejected by the
 // user and the turn as interrupted by the user. When the host or a restart
 // stopped it, Opus took the marks at their word: 4 of 4 checkpoints of a turn
@@ -203,15 +248,22 @@ export function afterStop(input, stamp, seen = [], delivered = []) {
 const STOP_MARKS='The user did not reject, stop or interrupt anything. Claude Code wrote the "The user doesn\'t want to proceed" tool results, "[Request interrupted by user for tool use]" and any "No response requested." reply because of this, not because of anything the user did.';
 // The desktop notes a Stop as <turn_aborted>. A restart can cut off a turn the
 // user had already stopped, and then the user did stop it.
-const userStopped = items => items.some(x => isDeveloper(x) && contentBlocks(x.content).some(c => c.text?.includes('<turn_aborted')));
-const hostStopped = (items, reason) => reason === 'compacted_mid_turn' || reason === 'Bridge shutting down.' && !userStopped(items);
+export const userStopped = items => items.some(x => isDeveloper(x) && contentBlocks(x.content).some(c => c.text?.includes('<turn_aborted')));
+const hostStopped = (items, reason) => reason === 'compacted_mid_turn' || [RESTART, CLAUDE_EXITED].includes(reason) && !userStopped(items);
+// Claude Code answers the call it was waiting on with an error such as "MCP
+// server is not connected" when it is terminated, or as rejected when it is
+// interrupted.
+const EXIT_MARKS = 'Claude Code stopped waiting for a host tool call, for example because a bridge restart stopped it. '+STOP_MARKS+' An error for that call, such as "MCP server is not connected", also came from this, not from the host.';
+const failedNote = ({status}) => `ended with an API error${status ? ` (status ${status})` : ''} before it finished. The user did not stop it, and the conversation up to the error is intact.`;
 // A compaction that forks a stopped turn sees the same marks. Without a note,
 // the checkpoint could record calls the host ran as never run.
-export function stoppedTurnNote(items, {reason, sent = 0}) {
-  const ran = items.filter(isResult).length;
+export function stoppedTurnNote(items, {reason, sent = 0, status}) {
+  const ran = items.filter(isCallResult).length;
+  if (reason === API_FAILED)
+    return [{type: 'text', text: `<turn_stopped>Your turn here ${failedNote({status})}${ran ? ' The host ran each tool call whose output follows.' : ''} The checkpoint should record the task as still in progress, continuing from here.</turn_stopped>`}];
   if (!hostStopped(items, reason))
     return ran ? [{type: 'text', text: '<turn_stopped>Your turn was stopped before it finished. A tool call shown as rejected or interrupted ran in the host if output for it follows.</turn_stopped>'}] : [];
-  const parts = [reason === 'compacted_mid_turn' ? 'The host paused your turn here to compact the conversation.' : 'Your turn was cut off here by a bridge restart.', STOP_MARKS];
+  const parts = [reason === 'compacted_mid_turn' ? 'The host paused your turn here to compact the conversation.' : reason === CLAUDE_EXITED ? 'Your turn was cut off here. '+EXIT_MARKS : 'Your turn was cut off here by a bridge restart.', ...(reason === CLAUDE_EXITED ? [] : [STOP_MARKS])];
   if (ran) parts.push('The host ran each tool call whose output follows, so that output is the call\'s normal result.');
   if (ran < sent) parts.push('A call shown as rejected with no output here may have run in part or in full, so the checkpoint should say to check its effects before relying on it or running it again.');
   parts.push('The checkpoint should leave out the pause and these marks, and record the task as still in progress, continuing from here.');
@@ -222,20 +274,22 @@ export function stoppedTurnNote(items, {reason, sent = 0}) {
 // no <turn_aborted> note. Told the turn was stopped, Opus answered the message
 // and waited for a go: 44 of 48 such resumes from October 9 to 11, 2026 carried
 // only the message.
-export const resampledSteer = (items, reason) => reason === 'Desktop cancelled or disconnected.' && items.some(isIncoming) && !items.some(isResult) && !userStopped(items);
-export function resumeAfterStop(items, {reason, sent = 0}) {
+export const resampledSteer = (items, reason) => reason === 'Desktop cancelled or disconnected.' && items.some(isIncoming) && !items.some(isCallResult) && !userStopped(items);
+export function resumeAfterStop(items, {reason, sent = 0, status}) {
   if (resampledSteer(items, reason)) {
     const parts = ['The desktop restarted your response to deliver the message below, which the user sent while you were working. The user did not stop you: Claude Code marked the response as interrupted by the user because of this restart.'];
     if (sent) parts.push('A tool call shown as rejected had already reached the host, which may have run it in part or in full. Check its effects before relying on it or running it again.');
     parts.push('Carry on with the task, taking the message into account.');
     return [{type: 'text', text: `<turn_stopped>${parts.join(' ')}</turn_stopped>`}, ...steeringPrompt(items)];
   }
-  const parts = [hostStopped(items, reason) ? 'Your previous turn was cut off by a bridge restart. '+STOP_MARKS : 'Your previous turn was stopped before it finished.'];
-  if (items.some(isResult)) parts.push('A tool call shown as rejected or interrupted may still have run in the host. The output the host recorded follows.');
+  const parts = [reason === API_FAILED ? 'Your previous attempt at this turn '+failedNote({status})
+    : !hostStopped(items, reason) ? 'Your previous turn was stopped before it finished.'
+    : reason === CLAUDE_EXITED ? 'Your previous turn was cut off. '+EXIT_MARKS : 'Your previous turn was cut off by a bridge restart. '+STOP_MARKS];
+  if (items.some(isCallResult)) parts.push('A tool call shown as rejected or interrupted may still have run in the host. The output the host recorded follows.');
   else if (sent) parts.push('A tool call shown as rejected had already reached the host, which may have run it in part or in full. Check its effects before relying on it or running it again.');
   if (!items.some(isIncoming)) parts.push('Continue the task from where it stopped.');
   return [{type: 'text', text: `<turn_stopped>${parts.join(' ')}</turn_stopped>`},
-    ...items.flatMap(x => userInput([x], {replay: isResult(x), prefix: false}))];
+    ...items.flatMap(x => userInput([x], {replay: isCallResult(x), prefix: false}))];
 }
 
 // Claude Code adds its own environment note naming the bridge's private empty
@@ -254,11 +308,23 @@ const COMMON_NOTE='Do not simulate tool calls in text. Text before a tool call i
 // at the top level (12 of 269 sessions), got "No such tool" and had to write
 // the whole payload again, once a 15K-character file costing 54 s.
 const EXEC_ONLY_TOOLS=['exec_command','write_stdin','apply_patch','view_image','web__run'];
+// The exec description documents every nested tool under a ### `name` heading,
+// 61 of them in desktop 26.1007.71326: the desktop's own app tools
+// (mcp__codex_app__…), MCP server tools, goals, clock__curr_time. From October
+// 9 to 12, 2026 Opus called three app tools at the top level as well
+// (set_thread_archived, attach_artifact, load_workspace_dependencies).
+const nestedTools=exec=>[...new Set([...(exec?.description??'').matchAll(/^### `([^`]+)`/gm)].map(m=>m[1]))];
+const joined=names=>names.length>1?names.slice(0,-1).join(', ')+' and '+names.at(-1):names[0];
 const execOnlyNote=exec=>{
   const names=EXEC_ONLY_TOOLS.filter(n=>exec?.description?.includes('`'+n+'`'));
-  if(!names.length)return '';
-  const list=names.length>1?names.slice(0,-1).join(', ')+' and '+names.at(-1):names[0];
-  return ` ${list} are not top-level tools here. Call them only from exec JavaScript as tools.<name>, for example await tools.${names[0]}(...). A top-level call fails, and its whole input has to be written again.`;
+  const others=nestedTools(exec).filter(n=>!EXEC_ONLY_TOOLS.includes(n));
+  if(!names.length&&!others.length)return '';
+  const list=joined(names);
+  const app=others.filter(n=>n.startsWith('mcp__codex_app__'));
+  const examples=[app.find(n=>n.endsWith('__read_thread'))??app[0],others.find(n=>n.startsWith('mcp__')&&!app.includes(n)),others.find(n=>!n.startsWith('mcp__')&&n.includes('__'))].filter(Boolean);
+  const rest=others.length?`${names.length?', and neither is any other tool the exec description documents':'Tools the exec description documents are not top-level tools here'}${examples.length?`, such as ${joined(examples)}`:''}`:'';
+  const lead=names.length?`${list} are not top-level tools here${rest}`:rest;
+  return ` ${lead}. Call them only from exec JavaScript as tools.<name>, for example await tools.${names[0]??others[0]}(...). A top-level call fails, and its whole input has to be written again.`;
 };
 const CHECKPOINT_RULES='Preserve the original objective, user requirements and preferences, decisions, exact file paths and identifiers, tool observations, changed files, completed work, failed attempts, outstanding work, and concrete next steps. Distinguish facts from assumptions. Preserve task-relevant numbers, phrases, constraints and corrections exactly. Do not execute the task or address the user. Output only a structured, concise checkpoint. Aim for 1500 to 4000 words for a long complex conversation and much less for a short one.';
 // Sent to a fork of the live session, which keeps its own system prompt so the
@@ -266,6 +332,14 @@ const CHECKPOINT_RULES='Preserve the original objective, user requirements and p
 // The fork still carries the thread's own instructions, such as "answer
 // tersely", which shortened its checkpoints, so the request sets them aside.
 export const COMPACTION_REQUEST='<compaction_request>The host is compacting this conversation to free context. Stop work on the task and do not call tools. Create a precise continuation checkpoint of the whole conversation so far, including any history shown above this request. The checkpoint replaces the conversation for whoever continues the work, so completeness matters more than brevity, and instructions about the length or style of answers to the user do not apply to it. Keep data the remaining work depends on, such as lists, tables, values, paths and identifiers, in full rather than as a pattern or a sample. Leave out the system prompt and tool list, which the host provides again. '+CHECKPOINT_RULES+'</compaction_request>';
+// Standalone search exists only where the desktop turned it on: web__run
+// inside exec, or a top-level web_run tool. In picker mode the app's OpenAI
+// provider gives GPT its hosted web_search instead, which Claude cannot use.
+export function offersWebSearch(tools = []) {
+  const exec = tools.find(t => t.name === 'exec' && t.type === 'custom');
+  if (exec) return String(exec.description ?? '').includes('`web__run`');
+  return normalizeTools(tools.filter(t => ['function', 'custom', 'namespace'].includes(t.type))).some(t => t.name === 'web_run');
+}
 // name is the selected model's display name. webSearch says whether the
 // bridge relays the desktop's standalone web search (opt-in).
 export function systemPrompt(body, {name, webSearch = false}) {
@@ -281,8 +355,11 @@ export function systemPrompt(body, {name, webSearch = false}) {
   // Since October 9, 2026 the desktop sends the base prompt as a leading
   // developer message with empty instructions, which the rename had missed,
   // so it covers every part and empty parts are left out.
+  // In picker mode a thread that starts on GPT keeps GPT's base prompt, which
+  // opens "You are Codex, an agent based on GPT-6.", for the whole thread; the
+  // desktop names a later model only in a <model_switch> note in the history.
   const desktop = [body.instructions ?? '', ...developers.map(x => contentBlocks(x.content).map(x => x.text).join('\n'))]
-    .filter(x => x.trim()).join('\n\n').replaceAll('As Codex, you are', 'You are');
+    .filter(x => x.trim()).join('\n\n').replace(/^You are Codex\b[^\n]*/, () => identity(name)).replaceAll('As Codex, you are', 'You are');
   return [desktop,
     [`You are ${name}, the main assistant. The chatgpt MCP tools are the tools of the host desktop runtime. Use their native schemas. The host executes them and applies its permissions.`, tools, 'image_gen is not available to Claude.', CWD_NOTE, HOST_POLICY_NOTE, TOOL_HABITS_NOTE, COMMON_NOTE, DEVELOPER_NOTE].filter(Boolean).join(' ')].filter(Boolean).join('\n\n');
 }
@@ -293,7 +370,7 @@ export function userInput(items, {replay = false, prefix = true} = {}) {
   const out = [];
   const start = prefix ? leadingEnd(items) : 0;
   for (const [i, x] of items.entries()) {
-    if (['reasoning','compaction_trigger'].includes(x.type) || (isDeveloper(x) && i < start)) continue;
+    if (['reasoning','compaction_trigger'].includes(x.type) || isHostCall(x) || (isDeveloper(x) && i < start)) continue;
     if (isDeveloper(x) && !replay) {
       out.push({type: 'text', text: '<developer_message>'}, ...contentBlocks(x.content), {type: 'text', text: '</developer_message>'});
     } else if (x.type === 'message') {
@@ -302,6 +379,8 @@ export function userInput(items, {replay = false, prefix = true} = {}) {
       if (replay) out.push({type: 'text', text: '</history_message>'});
     } else if (x.type === 'agent_message') {
       out.push({type: 'text', text: agentMessageText(x)});
+    } else if (isHostOutput(x)) {
+      out.push({type: 'text', text: hostOutputText(x)}, ...contentBlocks(x.output), {type: 'text', text: '</host_tool_output>'});
     } else if (isResult(x) && replay) {
       out.push({type: 'text', text: `<previous_tool_result call_id="${x.call_id}">`}, ...contentBlocks(x.output), {type: 'text', text: '</previous_tool_result>'});
     } else if (['function_call', 'custom_tool_call'].includes(x.type) && replay) {
@@ -326,16 +405,22 @@ const isImageContent = c => c.type === 'input_image' || c.type === 'image';
 const imagesIn = items => items.reduce((n, x) => n + (x.type === 'message' && Array.isArray(x.content) ? x.content.filter(isImageContent).length
   : isResult(x) && Array.isArray(x.output) ? x.output.filter(isImageContent).length : 0), 0);
 const isUser = x => x.type === 'message' && x.role === 'user';
-// The user messages after the last reply, tool call or result.
-const trailingUserMessages = items => items.slice(items.findLastIndex(x => !isUser(x) && !isDeveloper(x)) + 1).filter(isUser);
-export function replayImageNote(items) {
+// The user messages after the last reply, tool call or result. A message from
+// another thread starts a turn like a user message.
+const isTurnInput = x => isUser(x) || isHostOutput(x);
+const trailingUserMessages = items => items.slice(items.findLastIndex(x => !isTurnInput(x) && !isDeveloper(x)) + 1).filter(isTurnInput);
+// The same happens when another model's turns are shown as history: on
+// October 14, 2026 Haiku opened Claude Code's copy of an image the user had
+// sent GPT with view_image and said it came with the new message.
+export function replayImageNote(items, {otherModel = false} = {}) {
   const attached = imagesIn(trailingUserMessages(items));
   const earlier = imagesIn(items) - attached;
   if (!earlier) return [];
   const origin = attached
     ? `The ${attached === 1 ? 'image' : `${attached} images`} in the last user message ${attached === 1 ? 'was' : 'were'} attached to it. The rest come from earlier in the conversation.`
     : 'The images come from earlier in the conversation.';
-  return [{type: 'text', text: `<developer_message>The conversation above was imported from the desktop transcript. Claude Code lists a saved copy of each image in it after this message, as [Image: source: …] lines. ${origin} Each line is a file copy of an image already visible above, not an additional attachment, so there is no need to open it.</developer_message>`}];
+  const source = otherModel ? 'The other model\'s turns above come from the desktop transcript.' : 'The conversation above was imported from the desktop transcript.';
+  return [{type: 'text', text: `<developer_message>${source} Claude Code lists a saved copy of each image in it after this message, as [Image: source: …] lines. ${origin} Each line is a file copy of an image already visible above, not an additional attachment, so there is no need to open it.</developer_message>`}];
 }
 
 // Claude Code reads a user message whose text starts with "/" as a command,
@@ -355,6 +440,24 @@ export const STEERING_NOTE = '<developer_message>The user sent this while you we
 export function steeringPrompt(items) {
   const content = asPrompt(userInput(items, {prefix: false}));
   return items.some(x => x.type === 'message' && x.role === 'user') ? [...content, {type: 'text', text: STEERING_NOTE}] : content;
+}
+
+// Code mode documents the goal tools only inside exec, while the desktop's goal
+// continuation says to "call update_goal" as if it were a top-level tool. On
+// October 14, 2026 Haiku called update_goal at the top level in each of its 3
+// goal runs, got "No such tool" and only then called it from exec; with this
+// note it called it from exec in 4 of 4. The note rides with the continuation,
+// where the tool is named, leaving the cached prefix intact.
+const GOAL_TOOLS = ['update_goal', 'get_goal', 'create_goal'];
+const GOAL_TURN = '<codex_internal_context source="goal">';
+const isGoalTurn = x => isUser(x) && (typeof x.content === 'string' ? [{text: x.content}] : x.content ?? [])
+  .some(c => typeof c.text === 'string' && c.text.trimStart().startsWith(GOAL_TURN));
+export function goalToolNote(items, tools = []) {
+  const exec = tools.find(t => t.name === 'exec' && t.type === 'custom');
+  const names = GOAL_TOOLS.filter(n => nestedTools(exec).includes(n));
+  if (!names.includes('update_goal') || !trailingUserMessages(items).some(isGoalTurn)) return [];
+  const many = names.length > 1;
+  return [{type: 'text', text: `<developer_message>${joined(names)} ${many ? 'are not top-level tools' : 'is not a top-level tool'} here. Call ${many ? 'them' : 'it'} only from exec JavaScript, for example await tools.update_goal(...). A top-level call fails.</developer_message>`}];
 }
 
 // Claude Code tells Opus the date, and again when it changes, but never the
@@ -399,27 +502,52 @@ function fenceAfter(open,line) {
   const m=/^\s*(`{3,}|~{3,})(.*)$/.exec(line);
   return m&&!(m[1][0]==='`'&&m[2].includes('`'))?m[1]:null;
 }
+// The desktop's visualize skill shows the reference inside a ```text fence.
+// Sonnet copied the fence in 1 of 2 runs on October 14, 2026, and the desktop
+// drew both visuals as code. A plain fence that holds nothing but a reference
+// to an existing visualization is that reference.
+const plainFence=line=>/^\s*(`{3,}|~{3,})\s*(text)?\s*$/i.test(line);
+// A line that may still turn out to open a code fence.
+const maybeFence=start=>{const m=/^(`+|~+)(.*)$/.exec(start);return !!m&&(m[1].length<3?m[2]==='':!(m[1][0]==='`'&&m[2].includes('`')));};
 // Streams one message's text, holding back only a line that may still turn
-// out to be a visualization reference until it ends.
+// out to be a visualization reference, or a fence around one, until it ends.
 export class VisualizeLines {
-  line='';open=true;fence=null;
+  line='';open=true;fence=null;held=null;
   push(delta) {
     let out='';
     for(const ch of delta) {
-      if(ch==='\n') {
-        if(this.open)out+=this.fence?this.line:visualizeLine(this.line);
-        out+='\n';
-        this.fence=fenceAfter(this.fence,this.line);
-        this.line='';this.open=true;continue;
-      }
+      if(ch==='\n'){out+=this.lineEnd();continue;}
       this.line+=ch;
+      if(this.held)continue;
       if(!this.open){out+=ch;continue;}
       const start=this.line.trimStart();
-      if(this.fence||!('visualize{'.startsWith(start)||start.startsWith('visualize{'))){this.open=false;out+=this.line;}
+      if(this.fence||!('visualize{'.startsWith(start)||start.startsWith('visualize{')||maybeFence(start))){this.open=false;out+=this.line;}
     }
     return out;
   }
-  end() {const rest=this.open&&!this.fence?visualizeLine(this.line):this.open?this.line:'';this.line='';return rest;}
+  lineEnd() {
+    const line=this.line,open=this.open,held=this.held;this.line='';this.open=true;
+    if(held) {
+      if(held.ref==null&&visualizeLine(line)!==line){held.ref=line;return '';}
+      this.held=null;
+      if(held.ref!=null&&fenceAfter(this.fence,line)===null){this.fence=null;return visualizeLine(held.ref)+'\n';}
+      this.fence=fenceAfter(this.fence,line);
+      return held.opener+'\n'+(held.ref!=null?held.ref+'\n':'')+line+'\n';
+    }
+    const out=open?(this.fence?line:visualizeLine(line)):'';
+    const next=fenceAfter(this.fence,line);
+    if(!this.fence&&next&&plainFence(line)){this.fence=next;this.held={opener:line,ref:null};return '';}
+    this.fence=next;
+    return out+'\n';
+  }
+  end() {
+    const line=this.line,held=this.held;this.line='';this.held=null;
+    if(held) {
+      if(held.ref!=null&&fenceAfter(this.fence,line)===null){this.fence=null;return visualizeLine(held.ref);}
+      return held.opener+'\n'+(held.ref!=null?held.ref+'\n':'')+line;
+    }
+    return this.open&&!this.fence?visualizeLine(line):this.open?line:'';
+  }
 }
 
 export const KEEPALIVE_MS = 10000;

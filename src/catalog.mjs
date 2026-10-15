@@ -2,7 +2,7 @@
 // app's own GPT entries so fields this file does not know keep app defaults.
 // scripts/sync_runtime.py builds the same entries for the separate window.
 export const AUTO_COMPACT_SHARE=0.8;
-const identity=name=>`You are ${name}, running as the main assistant in ChatGPT Desktop. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled.`;
+export const identity=name=>`You are ${name}, running as the main assistant in ChatGPT Desktop. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled.`;
 
 // Code mode with tool search is what GPT uses; Claude needs the same entry shape.
 export const pickTemplate=list=>list.find(m=>m?.tool_mode==='code_mode_only')??null;

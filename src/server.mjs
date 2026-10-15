@@ -65,9 +65,12 @@ export function pruneToolSets(directory,now=Date.now()) {
 // reads Claude Code's credentials.
 // gatewayKey turns on picker mode, where the app's own OpenAI provider is
 // pointed at /g/<gatewayKey>/backend-api/codex (see gateway.mjs).
-export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000,exitGraceMs=15000}) {
+export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000,exitGraceMs=15000,initWaitMs=10000}) {
   if(!AUTH_MODES.includes(auth?.mode))throw new Error(`Unknown auth mode ${auth?.mode}. Use one of: ${AUTH_MODES.join(', ')}.`);
   if(auth.mode==='api_key'&&typeof auth.apiKey!=='function')throw new Error('API key mode needs an apiKey function.');
+  // Claude Code runs in claudeCwd and is handed files under stateDir, so a
+  // relative state folder would resolve against the wrong directory.
+  stateDir=path.resolve(stateDir);
   fs.mkdirSync(stateDir,{recursive:true,mode:0o700});
   const claudeCwd=path.join(stateDir,'empty-workspace');fs.mkdirSync(claudeCwd,{recursive:true,mode:0o700});
   const cacheDir=path.join(stateDir,'response-cache');fs.mkdirSync(cacheDir,{recursive:true,mode:0o700});
@@ -76,7 +79,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   const cacheTimer=setInterval(()=>{try{pruneResponseCache(cacheDir);pruneToolSets(toolSetDir);}catch(error){log('cache_cleanup_error',{message:error.message});}},900000);cacheTimer.unref();
   // resolvedModels maps a catalog slug to the model Claude Code last started
   // for it, so later processes pin aliases to the same version.
-  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,exitGraceMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
+  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,exitGraceMs,initWaitMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
   // startedModels keeps the same record across restarts, for the names the
   // picker shows only. Pinning starts empty, so an alias still follows Claude
   // Code to a new release after a restart.
@@ -235,7 +238,8 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   server.keepAliveTimeout=0;
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
   bridge.url=`http://127.0.0.1:${server.address().port}`;
-  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();for(const s of bridge.sessions.values()){s.cancel('Bridge shutting down.');await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
+  // A session stopped before Claude Code's init waits for it, so all are stopped before any is awaited.
+  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();const all=[...bridge.sessions.values()];for(const s of all)s.cancel('Bridge shutting down.');for(const s of all){await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
   log('bridge_ready',{url:bridge.url,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway});return bridge;
 }
 

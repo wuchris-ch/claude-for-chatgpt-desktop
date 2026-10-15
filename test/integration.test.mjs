@@ -309,7 +309,7 @@ test('Stop while a mid-turn message waits to be queued keeps the message and the
  assert.match(next,/RESUMED.*completed once.*never-queued note.*continue/);
 });
 test('a request the desktop drops before Claude starts leaves no Claude process running',async t=>{
- const {b,post}=await setup(t);const {port}=new URL(b.url);
+ const {b,post,logs}=await setup(t);const {port}=new URL(b.url);
  const body=JSON.stringify(request('slow-response'));
  for(let i=0;i<5;i++) {
   const socket=net.connect(Number(port),'127.0.0.1');await new Promise(r=>socket.once('connect',r));
@@ -317,7 +317,10 @@ test('a request the desktop drops before Claude starts leaves no Claude process 
  }
  await new Promise(r=>setTimeout(r,500));
  assert.equal(b.sessions.size>0,true);
+ // A process that started before the drop is stopped once it reports init.
+ for(let i=0;i<500&&[...b.sessions.values()].some(s=>s.child);i++)await new Promise(r=>setTimeout(r,10));
  for(const session of b.sessions.values())assert.equal(session.child,null,'a Claude process was left running');
+ assert.equal(logs.filter(x=>x.event==='claude_start').length,logs.filter(x=>x.event==='stopped_at_init').length);
  assert.ok(output(await(await post(request('hello'),{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'dropped-0'}})).text()));
 });
 test('a reply to a mid-turn message written only in thinking is shown before the next tool call',async t=>{
@@ -728,4 +731,187 @@ test('when GPT answers between two Claude turns, the resumed session receives it
  assert.equal(logs.filter(x=>x.event==='claude_start').at(-1).resume,true);
  assert.ok(logs.some(x=>x.event==='other_model_turns'&&x.items===6));
  assert.equal(logs.some(x=>x.event==='history_branch_rebuilt'),false);
+});
+test('an image from the user\'s ChatGPT files reaches Claude as a note, and the thread keeps working',async t=>{
+ const {post}=await setup(t);const first=request('echo-input what is in this image?');
+ first.input[0].content.push({type:'input_image',image_url:'',file_id:'file_00000000abc'});
+ const a=output(await(await post(first)).text());
+ assert.ok(a,'the first turn completes');assert.match(JSON.stringify(a),/ChatGPT files \(file_00000000abc\)/);
+ // Every later request carries the image as history.
+ const b=output(await(await post({...first,input:[...first.input,...a,...request('echo-input and now?','u2').input]})).text());
+ assert.ok(b,'the next turn completes');assert.match(JSON.stringify(b),/and now\?/);
+});
+test('an image the user sent GPT is named as a copy when Claude takes the thread back',async t=>{
+ const {post,logs}=await setup(t);const first=request('remember fixture');
+ const a=output(await(await post(first)).text());
+ await waitUntil(()=>logs.some(x=>x.event==='claude_exit'));
+ const toGpt=request('what is in this picture?','u2').input[0];toGpt.content.push({type:'input_image',image_url:'data:image/png;base64,YQ=='});
+ const gpt=[{type:'message',role:'assistant',content:[{type:'output_text',text:'GPT saw a cat'}]}];
+ const input=[...first.input,...a,toGpt,...gpt,request('echo-input did that image come with this message?','u3').input[0]];
+ const text=JSON.stringify(output(await(await post({...first,input})).text()));
+ assert.match(text,/other_model_turns/);assert.match(text,/GPT saw a cat/);
+ assert.match(text,/The other model's turns above come from the desktop transcript\..*The images come from earlier in the conversation\..*is a file copy of an image already visible above/);
+ assert.equal(logs.filter(x=>x.event==='claude_start').at(-1).resume,true);
+});
+// The fake's record of each prompt and assistant message, like a Claude Code transcript.
+const entries=dir=>fs.readFileSync(path.join(dir,'fake-entries'),'utf8').trim().split('\n').map(l=>JSON.parse(l));
+const rebuilt=logs=>logs.filter(x=>['interrupted_turn_recovery','history_import','history_branch_rebuilt','regeneration_rebuilt'].includes(x.event)).map(x=>x.event);
+const exits=logs=>logs.filter(x=>x.event==='claude_exit').length;
+// Stop a streaming response and wait for its process to exit.
+async function stopStreaming(post,body,logs){await stopWhileStreaming(post,body,logs);await waitUntil(()=>exits(logs)===logs.filter(x=>x.event==='claude_start').length);}
+test('a turn that ends with an API error resumes the native session when the desktop retries it',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ const failing={...first,input:[...first.input,...a,...request('api-error-529 please','user2').input]};
+ assert.match(failure(await(await post(failing)).text()),/API Error: 529/);
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_exit').length===2);
+ const report=resumed(output(await(await post(failing)).text()));
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.match(report.request,/turn_stopped>Your previous attempt at this turn ended with an API error \(status 529\) before it finished\. The user did not stop it.*Continue the task from where it stopped/);
+ // Claude Code kept the failed prompt.
+ assert.doesNotMatch(report.request,/api-error-529 please/);
+ assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.reason==='api_error'&&x.items===0));
+ assert.deepEqual(rebuilt(logs),[]);
+});
+test('a message sent after an API error follows the note, and an error that is not an API error still rebuilds',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('api-error-429');
+ assert.match(failure(await(await post(first)).text()),/API Error: 429/);
+ await waitUntil(()=>logs.some(x=>x.event==='claude_exit'));
+ const report=resumed(output(await(await post({...first,input:[...first.input,...request('is it back?','user2').input]})).text()));
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.match(report.request,/ended with an API error \(status 429\).*intact\.<\/turn_stopped>.*is it back\?/);assert.doesNotMatch(report.request,/Continue the task/);
+ const other=await setup(t);const hello=request('hello');const said=output(await(await other.post(hello)).text());
+ const plain={...hello,input:[...hello.input,...said,...request('plain-error','user2').input]};
+ assert.match(failure(await(await other.post(plain)).text()),/fixture failure/);
+ await waitUntil(()=>exits(other.logs)===2);
+ assert.match(JSON.stringify(output(await(await other.post({...plain,input:[...plain.input,...request('again','user3').input]})).text())),/REPLAY/);
+ assert.ok(other.logs.some(x=>x.event==='interrupted_turn_recovery'));
+});
+test('an API error after a tool result and a queued message resumes without sending either again',async t=>{
+ const {post,logs,dir}=await setup(t);
+ for(const [thread,mode] of [['started','tool-then-api-error'],['unstarted','tool-then-api-error unstarted']]) {
+  const headers={headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':thread}};
+  const first=request(mode);const call=output(await(await post(first,headers)).text())[0];
+  const input=[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'build id B-7731'},...request('btw add ZEBRA','user2').input];
+  const before=exits(logs);
+  assert.match(failure(await(await post({...first,input},headers)).text()),/API Error: 429/);
+  await waitUntil(()=>exits(logs)>before);
+  const report=resumed(output(await(await post({...first,input},headers)).text()));
+  assert.match(report.request,/ended with an API error \(status 429\)/);assert.doesNotMatch(report.request,/B-7731/);
+  // Claude Code records a queued message once it adds it to the conversation; one it never added is sent again.
+  if(thread==='started')assert.doesNotMatch(report.request,/ZEBRA/);else assert.equal(report.request.split('btw add ZEBRA').length,2);
+ }
+ assert.equal(logs.filter(x=>x.event==='tool_call').length,2);
+ assert.deepEqual(rebuilt(logs),[]);
+});
+test('a Stop before Claude Code reports init stops it at init, so the message is recorded once and the turn resumes',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ const slow={...first,input:[...first.input,...a,...request('slow-init-400 second question','user2').input]};
+ const abort=new AbortController();const pending=post(slow,{signal:abort.signal}).then(r=>r.text()).catch(()=>{});
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_start').length===2);abort.abort();await pending;
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_exit').length===2);
+ assert.ok(logs.some(x=>x.event==='stopped_at_init'));
+ // The user sends another message right away.
+ const report=resumed(output(await(await post({...slow,input:[...slow.input,...request('and a third','user3').input]})).text()));
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.match(report.request,/and a third/);assert.doesNotMatch(report.request,/second question/);
+ assert.equal(entries(dir).filter(e=>e.kind==='prompt'&&e.text.includes('second question')).length,1);
+ assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.reason==='Desktop cancelled or disconnected.'));
+ assert.deepEqual(rebuilt(logs),[]);
+});
+test('a Stop before an init that never comes stops Claude Code after the wait and the next request rebuilds',async t=>{
+ const {post,logs}=await setup(t,{initWaitMs:200});const first=request('hello');
+ const a=output(await(await post(first)).text());
+ const stuck={...first,input:[...first.input,...a,...request('never-init stuck','user2').input]};
+ const abort=new AbortController();const pending=post(stuck,{signal:abort.signal}).then(r=>r.text()).catch(()=>{});
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_start').length===2);abort.abort();await pending;
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_exit').length===2);
+ assert.ok(logs.some(x=>x.event==='init_overdue'));
+ assert.ok(output(await(await post({...stuck,input:[...stuck.input,...request('hello again','user3').input]})).text()));
+ assert.ok(logs.some(x=>x.event==='interrupted_turn_recovery'));
+});
+test('a stopped message the user edits or withdraws is dropped from the native session instead of rebuilding it',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ await stopStreaming(post,{...first,input:[...first.input,...a,...request('slow-response','user2').input]},logs);
+ const note={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The user interrupted the previous turn.</turn_aborted>'}]};
+ const edited={...first,input:[...first.input,...a,note,...request('edited question','user3').input]};
+ const out=output(await(await post(edited)).text());
+ const said=out[0].content[0].text;assert.match(said,/^TRUNCATED /);const report=JSON.parse(said.slice(10));
+ const e=entries(dir);
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ // Back to the first turn's reply, dropping the stopped turn.
+ assert.equal(report.at,e.find(x=>x.kind==='assistant').uuid);
+ assert.equal(report.drops,e.find(x=>x.kind==='prompt'&&x.text.includes('slow-response')).uuid);
+ assert.match(report.request,/turn_aborted.*edited question.*current_time/);assert.doesNotMatch(report.request,/slow-response|turn_stopped/);
+ assert.ok(logs.some(x=>x.event==='withdrawn_turn_dropped'&&x.items===2));
+ assert.deepEqual(rebuilt(logs),[]);
+ // The next turn continues the same native session.
+ const next=JSON.stringify(output(await(await post({...edited,input:[...edited.input,...out,...request('echo-input next','user4').input]})).text()));
+ assert.match(next,/ECHO .*echo-input next/);assert.doesNotMatch(next,/edited question/);
+ assert.equal(logs.filter(x=>x.event==='claude_start').at(-1).resume,true);assert.deepEqual(rebuilt(logs),[]);
+});
+test('a withdrawn message stopped before init is dropped too',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ const abort=new AbortController();const pending=post({...first,input:[...first.input,...a,...request('slow-init-300 typo','user2').input]},{signal:abort.signal}).then(r=>r.text()).catch(()=>{});
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_start').length===2);abort.abort();await pending;
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_exit').length===2);
+ const said=output(await(await post({...first,input:[...first.input,...a,...request('fixed question','user3').input]})).text())[0].content[0].text;
+ const report=JSON.parse(said.replace(/^TRUNCATED /,''));
+ assert.equal(report.drops,entries(dir).find(x=>x.kind==='prompt'&&x.text.includes('slow-init-300 typo')).uuid);
+ assert.match(report.request,/fixed question/);assert.deepEqual(rebuilt(logs),[]);
+});
+test('when Claude Code refuses to drop a withdrawn turn, the same request rebuilds from the desktop transcript',async t=>{
+ const {post,logs}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ await stopStreaming(post,{...first,input:[...first.input,...a,...request('slow-response','user2').input]},logs);
+ const text=await(await post({...first,input:[...first.input,...a,...request('refuse-truncation edited','user3').input]})).text();
+ assert.equal(failure(text),undefined);
+ const out=JSON.stringify(output(text));assert.match(out,/REPLAY/);assert.match(out,/refuse-truncation edited/);
+ assert.deepEqual(logs.filter(x=>['withdrawn_turn_dropped','withdrawn_turn_refused','interrupted_turn_recovery','history_import'].includes(x.event)).map(x=>x.event),['withdrawn_turn_dropped','withdrawn_turn_refused','interrupted_turn_recovery','history_import']);
+ assert.equal(logs.some(x=>x.event==='error'),false);
+});
+test('a withdrawn message whose turn reached the host with a tool call is rebuilt',async t=>{
+ const {post,logs,b}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ output(await(await post({...first,input:[...first.input,...a,...request('invoke-tool','user2').input]})).text());
+ await evictIdleSessions(b,Date.now()+7200001);await waitUntil(()=>logs.filter(x=>x.event==='claude_exit').length===2);
+ assert.ok(output(await(await post({...first,input:[...first.input,...a,...request('something else','user3').input]})).text()));
+ assert.ok(logs.some(x=>x.event==='interrupted_turn_recovery'));assert.equal(logs.some(x=>x.event==='withdrawn_turn_dropped'),false);
+});
+test('Claude Code exiting while the host runs a tool, as in a restart, saves the turn so the result resumes it',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'claude-bridge-test-'));const logs=[];let b;
+ t.after(async()=>{await b?.close();fs.rmSync(dir,{recursive:true,force:true});});
+ const start=()=>startBridge({stateDir:dir,token:'fixture-secret',port:0,claude:fixture,log:(event,data)=>logs.push({event,...data})});
+ const poster=b=>(thread,body)=>fetch(b.url+'/v1/responses',{method:'POST',headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':thread},body:JSON.stringify(body)});
+ b=await start();
+ // A restart signals Claude Code before the bridge: SIGTERM ends it, SIGINT makes it cancel the call and exit.
+ const turns={};
+ for(const [thread,mode,signal] of [['term','invoke-tool','SIGTERM'],['int','abort-on-sigint','SIGINT']]) {
+  const first=request(mode);const call=output(await(await poster(b)(thread,first)).text())[0];
+  const session=[...b.sessions.values()].find(s=>s.key.startsWith(thread+':'));
+  turns[thread]={first,call,claudeId:session.record.claudeId};
+  session.child.kill(signal);await waitUntil(()=>!session.child);
+  assert.equal(session.record.stop.reason,'claude_exited');assert.equal(session.record.stop.sent,1);
+ }
+ await b.close();b=await start();
+ for(const [thread,{first,call,claudeId}] of Object.entries(turns)) {
+  const report=resumed(output(await(await poster(b)(thread,{...first,input:[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'ran during restart'}]})).text()));
+  assert.equal(report.resume,claudeId);
+  assert.match(report.request,/Your previous turn was cut off\. Claude Code stopped waiting for a host tool call.*The output the host recorded follows.*ran during restart/);
+ }
+ assert.equal(logs.filter(x=>x.event==='stopped_turn_resumed'&&x.reason==='claude_exited').length,2);
+ assert.deepEqual(rebuilt(logs),[]);assert.equal(logs.some(x=>x.event==='error'),false);
+});
+test('bridge shutdown stops every session before waiting on any, so each one still starting records its stop at init',async t=>{
+ const {b,post,logs}=await setup(t);
+ const pending=['a','b'].map(thread=>post(request('slow-init-400 hello '+thread),{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'shutdown-'+thread}}).then(r=>r.text()).catch(()=>{}));
+ await waitUntil(()=>logs.filter(x=>x.event==='claude_start').length===2);
+ await b.close();await Promise.all(pending);
+ const at=event=>logs.map((x,i)=>x.event===event?i:-1).filter(i=>i>=0);
+ assert.equal(at('cancel').length,2);assert.ok(at('cancel')[1]<at('claude_exit')[0],'both sessions were stopped before either exited');
+ assert.equal(logs.filter(x=>x.event==='stopped_at_init'&&x.reason==='Bridge shutting down.').length,2);
+ for(const s of b.sessions.values())assert.equal(s.record.stop?.reason,'Bridge shutting down.');
 });

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
+import {visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
 
 test('freeform tools preserve multiline JavaScript without JSON coercion',()=>{
  const [tool]=normalizeTools([{type:'custom',name:'exec',description:'Execute JS'}]);
@@ -32,7 +32,8 @@ test('tool images retain their actual bytes and media type',()=>{
  assert.deepEqual(result.content,[{type:'text',text:'image below'},{type:'image',mimeType:'image/png',data}]);
 });
 test('unsupported content and remote images cannot silently lose context',()=>{
- assert.throws(()=>contentBlocks([{type:'input_audio',data:'abc'}]),/Unsupported content/);
+ // Audio becomes a visible note, so Claude can say it cannot hear it and the thread keeps working.
+ assert.match(contentBlocks([{type:'input_audio',data:'a'.repeat(3000)}])[0].text,/"type":"input_audio".*characters left out/);
  assert.throws(()=>contentBlocks([{type:'input_image',image_url:'https://example.com/a.png'}]),/inline/);
 });
 test('fresh input preserves user images and excludes developer text',()=>{
@@ -79,6 +80,12 @@ test('system prompt corrects Codex identity and working directory for either too
  assert.match(code,/inside exec as tools\.web__run/);
  assert.match(code,/exec_command and apply_patch are not top-level tools here\. Call them only from exec JavaScript as tools\.<name>, for example await tools\.exec_command/);
  assert.doesNotMatch(systemPrompt({...body,tools:[{type:'custom',name:'exec'}]},options),/not top-level tools/);
+ // Every tool the exec description documents is nested, including the desktop's
+ // app tools and MCP server tools, which Opus also called at the top level.
+ const nested=systemPrompt({...body,tools:[{type:'custom',name:'exec',description:'### `exec_command`\nRuns a command.\n\n### `clock__curr_time`\nTime.\n\n### `mcp__codex_app__set_thread_archived`\nArchive or unarchive a thread.\n\n### `mcp__figma__get_design_context`\nDesign context.'}]},options);
+ assert.match(nested,/exec_command are not top-level tools here, and neither is any other tool the exec description documents, such as mcp__codex_app__set_thread_archived, mcp__figma__get_design_context and clock__curr_time\. Call them only from exec JavaScript as tools\.<name>/);
+ const appOnly=systemPrompt({...body,tools:[{type:'custom',name:'exec',description:'### `mcp__codex_app__read_thread`\nRead a thread.'}]},options);
+ assert.match(appOnly,/Tools the exec description documents are not top-level tools here, such as mcp__codex_app__read_thread\. Call them only from exec JavaScript as tools\.<name>, for example await tools\.mcp__codex_app__read_thread/);
  assert.match(code,/Ignore it: the working directory is the cwd in <environment_context>/);
  assert.match(code,/refuses any shell command containing rm -f or rm -rf/);
  assert.match(code,/render its pages to images in a new temporary directory/);assert.match(code,/mktemp -d/);assert.match(code,/killed when the shell command returns/);
@@ -173,6 +180,35 @@ test('a compaction of a stopped turn says which interrupted tool calls the host 
  assert.match(stopped,/^<turn_stopped>Your turn was stopped before it finished\. A tool call/);assert.doesNotMatch(stopped,/did not reject/);
  assert.deepEqual(stoppedTurnNote([next],{reason:'Desktop cancelled or disconnected.'}),[]);
 });
+test('a turn that ended with an API error resumes with a note that the user did not stop it',()=>{
+ const user=(text,id)=>({type:'message',id,role:'user',content:[{type:'input_text',text}]});
+ assert.equal(resumeAfterStop([],{reason:API_FAILED,status:529})[0].text,'<turn_stopped>Your previous attempt at this turn ended with an API error (status 529) before it finished. The user did not stop it, and the conversation up to the error is intact. Continue the task from where it stopped.</turn_stopped>');
+ // A message the user sent after the error follows the note, which then does not ask to continue.
+ const next=resumeAfterStop([user('try again please','u2')],{reason:API_FAILED}).map(x=>x.text).join('');
+ assert.match(next,/^<turn_stopped>Your previous attempt at this turn ended with an API error before it finished\..*intact\.<\/turn_stopped>try again please$/);
+ assert.match(stoppedTurnNote([{type:'custom_tool_call_output',call_id:'c1',output:'ran'}],{reason:API_FAILED,status:429})[0].text,/^<turn_stopped>Your turn here ended with an API error \(status 429\) before it finished\. The user did not stop it.*The host ran each tool call whose output follows\. The checkpoint should record the task as still in progress/);
+});
+test('a turn cut off when Claude Code exited while the host ran a tool says the error and rejection came from the exit',()=>{
+ const output={type:'function_call_output',call_id:'c1',output:'build passed'};
+ const text=resumeAfterStop([output],{reason:CLAUDE_EXITED,sent:1}).map(x=>x.text).join('');
+ assert.match(text,/^<turn_stopped>Your previous turn was cut off\. Claude Code stopped waiting for a host tool call, for example because a bridge restart stopped it\. The user did not reject, stop or interrupt anything\..*"MCP server is not connected", also came from this, not from the host\. A tool call shown as rejected or interrupted may still have run in the host\. The output the host recorded follows\. Continue the task from where it stopped\.<\/turn_stopped><previous_tool_result call_id="c1">build passed<\/previous_tool_result>$/);
+ assert.match(stoppedTurnNote([output],{reason:CLAUDE_EXITED,sent:1})[0].text,/^<turn_stopped>Your turn was cut off here\. Claude Code stopped waiting.*not from the host\. The host ran each tool call whose output follows/);
+ // The user had stopped the turn in the desktop.
+ const aborted={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The previous turn was interrupted on purpose.</turn_aborted>'}]};
+ assert.match(resumeAfterStop([aborted,output],{reason:CLAUDE_EXITED,sent:1})[0].text,/^<turn_stopped>Your previous turn was stopped before it finished\./);
+});
+test('a withdrawn message is recognised only when the earlier history is unchanged and a new message follows',()=>{
+ const user=(text,id)=>({type:'message',id,role:'user',content:[{type:'input_text',text}]});
+ const reply={type:'message',role:'assistant',content:[{type:'output_text',text:'done'}]};
+ const note={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted/>'}]};
+ const before=[user('first','u1'),reply];const stamp=historyStamp(before);
+ assert.deepEqual(afterWithdrawn([...before,note,user('edited','u3')],stamp,[inputKey(before[0])]),[note,user('edited','u3')]);
+ // The earlier history changed, nothing new arrived, or the request carries tool output or a reply.
+ assert.equal(afterWithdrawn([user('first, edited','u1'),reply,user('edited','u3')],stamp,[]),null);
+ assert.equal(afterWithdrawn([...before,note],stamp,[inputKey(before[0])]),null);
+ assert.equal(afterWithdrawn([...before,{type:'function_call_output',call_id:'c1',output:'x'},user('edited','u3')],stamp,[]),null);
+ assert.equal(afterWithdrawn([...before,user('edited','u3')],null,[]),null);
+});
 test('an imported history explains the image copies Claude Code lists after it, and leaves plain attachments alone',()=>{
  const image={type:'input_image',image_url:'data:image/png;base64,YQ=='};
  const user=(content,id)=>({type:'message',id,role:'user',content});
@@ -209,7 +245,8 @@ test('a bare visualization reference to an existing HTML file gets the desktop m
  // Claude's text arrives in small pieces that split the reference anywhere.
  for(let n=0;n<text.length;n+=7)s.text(i,text.slice(n,n+7));
  s.finishText(i,true);s.complete();
- const expected=`Here is the layout.\n\n${wrapped}\n\nSwitch tabs.\n\n\`\`\`text\n${ref}\n\`\`\`\nvisualize is a skill.\n${wrapped}`;
+ // A reference fenced the way the skill shows it is still the reference.
+ const expected=`Here is the layout.\n\n${wrapped}\n\nSwitch tabs.\n\n${wrapped}\nvisualize is a skill.\n${wrapped}`;
  assert.equal(s.output[0].content[0].text,expected);
  const events=res.chunks.join('').split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
  assert.equal(events.filter(e=>e.type==='response.output_text.delta').map(e=>e.delta).join(''),expected);
@@ -241,4 +278,53 @@ test('a visualization line inside any code block stays as written',()=>{
   assert.equal(drawn('```x``` is inline code\n'+ref+'\n'),true);
   assert.equal(drawn('- item\n    ```\n    y\n    ```\n'+ref+'\n'),true);
  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+test('a reference copied inside the skill\'s text fence is drawn, and real code stays code',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge viz '));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const file=path.join(dir,'bar-chart.html');fs.writeFileSync(file,'<div>x</div>');
+ const ref=`visualize{"path":${JSON.stringify(file)}}`,wrapped=`visualize{"path":${JSON.stringify(file)}}`;
+ const missing=`visualize{"path":${JSON.stringify(path.join(dir,'missing.html'))}}`;
+ const run=(text,n)=>{const v=new VisualizeLines();let out='';for(let i=0;i<text.length;i+=n)out+=v.push(text.slice(i,i+n));return out+v.end();};
+ const cases=[
+  // As Sonnet wrote it on October 14, 2026: two visuals, each in a ```text fence.
+  ['Bar chart:\n\n```text\n'+ref+'\n```\n\nPie chart:\n\n```text\n'+ref+'\n```\n','Bar chart:\n\n'+wrapped+'\n\nPie chart:\n\n'+wrapped+'\n'],
+  ['```\n'+ref+'\n```','\n'.slice(1)+wrapped],
+  ['~~~text\n'+ref+'\n~~~\nafter',wrapped+'\nafter'],
+  ['  ```text\n'+ref+'\n  ```\r\nafter',wrapped+'\nafter'],
+  // Real code, other content, a missing file or an unclosed fence stay as written.
+  ['```js\n'+ref+'\n```\n','```js\n'+ref+'\n```\n'],
+  ['```text\n'+ref+'\n'+ref+'\n```\n','```text\n'+ref+'\n'+ref+'\n```\n'],
+  ['```text\nnote\n'+ref+'\n```\n','```text\nnote\n'+ref+'\n```\n'],
+  ['```text\n'+missing+'\n```\n','```text\n'+missing+'\n```\n'],
+  ['```text\n'+ref+'\n','```text\n'+ref+'\n'],
+  ['```text\n'+ref,'```text\n'+ref],
+  ['```text\n```\n'+ref,'```text\n```\n'+wrapped],
+  ['```\ncode\n```\n'+ref+'\n','```\ncode\n```\n'+wrapped+'\n'],
+  ['``inline`` and `x`\n'+ref,'``inline`` and `x`\n'+wrapped],
+ ];
+ for(const [text,want] of cases)for(const n of [1,3,text.length])assert.equal(run(text,n).replace(/\r/g,''),want.replace(/\r/g,''),JSON.stringify({text,n}));
+ // Ordinary text still streams as it arrives.
+ const v=new VisualizeLines();assert.equal(v.push('Plain text '),'Plain text ');assert.equal(v.push('`code` more'),'`code` more');
+});
+test('a GPT refusal and unknown content parts in history reach Claude as text',()=>{
+ const blocks=contentBlocks([{type:'output_text',text:'ok'},{type:'refusal',refusal:'I can not help with that.'},{type:'input_file',filename:'a.pdf',file_data:'x'.repeat(5000)}]);
+ assert.deepEqual(blocks.map(b=>b.type),['text','text','text']);
+ assert.equal(blocks[1].text,'[Refused: I can not help with that.]');
+ assert.match(blocks[2].text,/"filename":"a\.pdf".*\[5000 characters left out\]/);
+});
+test('an image from the user\'s ChatGPT files becomes a note instead of breaking the thread',()=>{
+ const file={type:'input_image',image_url:'',file_id:'file_00000000abc'};
+ const [text,note]=contentBlocks([{type:'input_text',text:'What is this?'},file]);
+ assert.deepEqual(text,{type:'text',text:'What is this?'});
+ assert.equal(note.type,'text');assert.match(note.text,/ChatGPT files \(file_00000000abc\).*ask the user to attach the image itself/);
+ // Every later request carries it as history.
+ assert.doesNotThrow(()=>historyStamp([{type:'message',role:'user',content:[{type:'input_text',text:'What is this?'},file]},{type:'message',role:'assistant',content:[{type:'output_text',text:'I cannot see it.'}]}]));
+});
+test('images in another model\'s turns are named as copies of what is shown',()=>{
+ const image={type:'input_image',image_url:'data:image/png;base64,iVBORw0KGgo='};
+ const other=[{type:'message',role:'user',content:[{type:'input_text',text:'look'},image]},{type:'message',role:'assistant',content:[{type:'output_text',text:'A cat.'}]},{type:'message',role:'user',content:[{type:'input_text',text:'Did it come with this message?'}]}];
+ const [note]=replayImageNote(other,{otherModel:true});
+ assert.match(note.text,/^<developer_message>The other model's turns above come from the desktop transcript\. /);
+ assert.match(note.text,/The images come from earlier in the conversation\..*not an additional attachment/);
+ assert.match(replayImageNote(other)[0].text,/^<developer_message>The conversation above was imported from the desktop transcript\. /);
 });

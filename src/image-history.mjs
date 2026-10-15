@@ -10,12 +10,18 @@ const HIGH_TOTAL=20*1024*1024, LOW_TOTAL=12*1024*1024;
 const isImage=c=>c.type==='input_image'||c.type==='image';
 const imageBytes=c=>Buffer.byteLength(c.image_url??c.data??'');
 const isUserMessage=item=>item.type==='message'&&item.role==='user'&&Array.isArray(item.content);
-const isModelOutput=item=>(item.type==='message'&&item.role==='assistant')||['function_call','custom_tool_call','reasoning'].includes(item.type);
+// A turn ends with the model's final answer, or with a Stop, which the desktop
+// notes as <turn_aborted>. Commentary and tool calls happen inside the turn.
+const isTurnEnd=item=>item.type==='message'&&(item.role==='assistant'&&item.phase!=='commentary'||
+  ['developer','system'].includes(item.role)&&JSON.stringify(item.content??'').includes('<turn_aborted'));
 
 export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
-  // Attachments since the model last answered are the current request and
-  // always stay, as does the newest tool image.
-  const current=input.findLastIndex(isModelOutput);
+  // Attachments since the model last finished a turn are the current request
+  // and always stay, as does the newest tool image. Counting from its last tool
+  // call instead dropped screenshots the user had just attached once Claude's
+  // own screenshots in the same turn filled the window, and rebuilt the
+  // session in the middle of the turn.
+  const current=input.findLastIndex(isTurnEnd);
   const images=[], userImages=[];
   input.forEach((item,position)=> {
     if(isResult(item)&&Array.isArray(item.output))for(const c of item.output.filter(isImage))images.push({position,bytes:imageBytes(c)});

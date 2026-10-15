@@ -3,6 +3,7 @@
 import readline from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
+import {randomUUID} from 'node:crypto';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 const arg=name=>process.argv[process.argv.indexOf(name)+1];
@@ -17,34 +18,78 @@ const mcpArg=arg('--mcp-config');
 const config=JSON.parse(mcpArg.trimStart().startsWith('{')?mcpArg:fs.readFileSync(mcpArg,'utf8')).mcpServers.chatgpt;
 const countFile=path.join(path.dirname(arg('--system-prompt-file')),'fake-starts');
 fs.appendFileSync(countFile,'start\n');
+// Like a Claude Code transcript: every prompt and assistant message by uuid, in order.
+const entriesFile=path.join(path.dirname(arg('--system-prompt-file')),'fake-entries');
+const entry=x=>fs.appendFileSync(entriesFile,JSON.stringify({session:process.argv.includes('--resume')?arg('--resume'):arg('--session-id'),...x})+'\n');
+const entries=()=>fs.existsSync(entriesFile)?fs.readFileSync(entriesFile,'utf8').trim().split('\n').map(l=>JSON.parse(l)):[];
 const send=x=>process.stdout.write(JSON.stringify(x)+'\n');
 const event=x=>send({type:'stream_event',event:x});
+const assistant=content=>{const uuid=randomUUID();entry({kind:'assistant',uuid});send({type:'assistant',uuid,message:{model,content}});};
 const start=()=>event({type:'message_start',message:{model,usage:{input_tokens:10}}});
 const finish=()=>{event({type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:5}});event({type:'message_stop'});send({type:'result',is_error:false,modelUsage:{[model]:{contextWindow:1000000}},permission_denials:[]});};
-const text=value=>{start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:value}});send({type:'assistant',message:{model,content:[{type:'text',text:value}]}});finish();};
+const text=value=>{start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:value}});assistant([{type:'text',text:value}]);finish();};
+// Mirrors Claude Code 2.1.300: an API error is a synthetic message, then an error result naming the status.
+const apiError=status=>{send({type:'assistant',uuid:randomUUID(),error:status===429?'rate_limit':'server_error',message:{model:'<synthetic>',content:[{type:'text',text:`API Error: ${status} Overloaded.`}]}});
+ send({type:'result',subtype:'success',is_error:true,api_error_status:status,result:`API Error: ${status} Overloaded.`,modelUsage:{},permission_denials:[]});};
 const client=new Client({name:'fixture',version:'1'});
 await client.connect(new StreamableHTTPClientTransport(new URL(config.url),{requestInit:{headers:config.headers}}));
 const listed=await client.listTools();
-send({type:'system',subtype:'init',model,tools:['mcp__chatgpt__exec'],mcp_servers:[{name:'chatgpt',status:'connected'}]});
 const input=readline.createInterface({input:process.stdin});
 // Like Claude Code, input that arrives while a tool call waits joins the same turn after the result.
 // linger-after-turn: a process that keeps running after its input closes.
-let busy=false,linger=false;const queued=[];
+let busy=false,linger=false,initialized=false;const queued=[],queuedIds=[];
+// Mirrors Claude Code: a queued message is added to the conversation with the tool result.
+const attachQueued=()=>{for(const id of queuedIds.splice(0))send({type:'command_lifecycle',command_uuid:id,state:'started'});};
 input.on('line',async line=>{
  const msg=JSON.parse(line);const request=JSON.stringify(msg.message.content);
+ if(!initialized) {
+  initialized=true;
+  // Claude Code 2.1.300 refuses a truncating resume before init when the dropped
+  // part does not start with the named turn's prompt.
+  if(process.argv.includes('--resume-session-at')&&(request.includes('refuse-truncation')||!entries().some(e=>e.kind==='prompt'&&e.uuid===arg('--resume-drops-turn')))) {
+   send({type:'result',subtype:'error_during_execution',is_error:true,errors:['Resume rejected by --resume-drops-turn: fixture refusal'],modelUsage:{},permission_denials:[]});process.exit(1);
+  }
+  // Like Claude Code, it records the prompt and then reports init.
+  entry({kind:'prompt',uuid:msg.uuid,text:request.slice(0,80)});
+  const fresh=!request.includes('<history_message');
+  if(fresh&&request.includes('never-init'))return;
+  // slow-init-<ms> in the message, or slow-init in the instructions: Claude Code
+  // still loading a long session when the desktop stops.
+  const slow=fresh&&/slow-init-(\d+)/.exec(request);
+  const wait=slow?Number(slow[1]):fs.readFileSync(arg('--system-prompt-file'),'utf8').includes('slow-init')?1500:0;
+  if(wait)await new Promise(r=>setTimeout(r,wait));
+  send({type:'system',subtype:'init',model,tools:['mcp__chatgpt__exec'],mcp_servers:[{name:'chatgpt',status:'connected'}]});
+  if(process.argv.includes('--resume-session-at')){text('TRUNCATED '+JSON.stringify({resume:arg('--resume'),at:arg('--resume-session-at'),drops:arg('--resume-drops-turn'),request}));return;}
+ }
  if(request.includes('linger-after-turn'))linger=true;
  // Like Claude Code, a message sent with a uuid is confirmed once queued. A large
  // message (an image) can finish parsing after a tool result has returned.
  const confirm=()=>{if(msg.uuid&&!request.includes('never-queued'))send({type:'command_lifecycle',command_uuid:msg.uuid,state:'queued'});};
- if(busy){if(request.includes('slow-queue'))setTimeout(()=>{queued.push(msg.message.content);confirm();},300);else{queued.push(msg.message.content);confirm();}return;}
+ if(busy){if(request.includes('slow-queue'))setTimeout(()=>{queued.push(msg.message.content);queuedIds.push(msg.uuid);confirm();},300);else{queued.push(msg.message.content);queuedIds.push(msg.uuid);confirm();}return;}
  confirm();
  if(process.argv.includes('--json-schema')) {
   // Mirrors Claude Code 2.1.280: commentary, a synthetic StructuredOutput tool call, then result.structured_output.
   const schema=JSON.parse(arg('--json-schema'));if(schema.$schema){text('REJECTED $schema');return;}const value={title:'Fixture title',required:schema.required??null};
   start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Choosing a title.'}});
-  send({type:'assistant',message:{model,content:[{type:'text',text:'Choosing a title.'},{type:'tool_use',id:'toolu_structured',name:'StructuredOutput',input:value}]}});
+  assistant([{type:'text',text:'Choosing a title.'},{type:'tool_use',id:'toolu_structured',name:'StructuredOutput',input:value}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   send({type:'result',is_error:false,modelUsage:{[model]:{contextWindow:1000000}},permission_denials:[],result:JSON.stringify(value),structured_output:value});return;
+ }
+ // A goal continuation. Like Haiku on October 14, 2026, the fixture calls
+ // update_goal as a top-level tool unless told that the host runs it in exec.
+ if(request.includes('codex_internal_context source=')) {
+  start();
+  if(!request.includes('tools.update_goal')) {
+   send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_goal_top',name:'mcp__chatgpt__update_goal',input:{status:'complete'}}]}});
+   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
+   send({type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'toolu_goal_top',is_error:true,content:'No such tool available: mcp__chatgpt__update_goal'}]}});
+   start();
+  }
+  const args={input:'text(await tools.update_goal({status:"complete"}));'};
+  send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_goal',name:'mcp__chatgpt__exec',input:args}]}});
+  event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
+  busy=true;const result=await client.callTool({name:'exec',arguments:args});busy=false;
+  text('GOAL '+JSON.stringify(result));return;
  }
  if(request.includes('echo-input')){text('ECHO '+request);return;}
  // Stands in for a long think: no stream events at all until the answer.
@@ -64,7 +109,7 @@ input.on('line',async line=>{
  }
  if(request.includes('unknown-tool')) {
   start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'Searching.'}});
-  send({type:'assistant',message:{model,content:[{type:'text',text:'Searching.'},{type:'tool_use',id:'toolu_ghost',name:'web_run',input:{}}]}});
+  assistant([{type:'text',text:'Searching.'},{type:'tool_use',id:'toolu_ghost',name:'web_run',input:{}}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   // Mirrors Claude Code: an unknown tool gets a native error result and the model continues.
   send({type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'toolu_ghost',is_error:true,content:'No such tool available: web_run'}]}});
@@ -72,7 +117,7 @@ input.on('line',async line=>{
  }
  if(request.includes('two-tools')) {
   const first={input:'text("one");'},second={input:'text("two");'};start();
-  send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_one',name:'mcp__chatgpt__exec',input:first},{type:'tool_use',id:'toolu_two',name:'mcp__chatgpt__exec',input:second}]}});
+  assistant([{type:'tool_use',id:'toolu_one',name:'mcp__chatgpt__exec',input:first},{type:'tool_use',id:'toolu_two',name:'mcp__chatgpt__exec',input:second}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   const results=[await client.callTool({name:'exec',arguments:first}),await client.callTool({name:'exec',arguments:second})];
   text('RESULTS '+JSON.stringify(results));return;
@@ -81,7 +126,7 @@ input.on('line',async line=>{
   const report=extra=>text('FORK '+JSON.stringify({fork:process.argv.includes('--fork-session'),resume:arg('--resume'),model,effort:process.argv.includes('--effort')?arg('--effort'):null,tools:listed.tools.map(t=>t.name),prompt:fs.readFileSync(arg('--system-prompt-file'),'utf8').slice(0,40),request:request.slice(0,4000),caching:process.env.DISABLE_PROMPT_CACHING?'off':'on',...extra}));
   if(!request.includes('call-tool-first')){report({});return;}
   const args={input:'text("during compaction");'};start();
-  send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_compacting',name:'mcp__chatgpt__exec',input:args}]}});
+  assistant([{type:'tool_use',id:'toolu_compacting',name:'mcp__chatgpt__exec',input:args}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   report({toolResult:await client.callTool({name:'exec',arguments:args})});return;
  }
@@ -91,39 +136,46 @@ input.on('line',async line=>{
   const transcript=msg.message.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
   text('REPLAY '+JSON.stringify({input:transcript.length<5000?transcript:transcript.slice(0,500)+'\n'+transcript.slice(-1500),images:msg.message.content.filter(c=>c.type==='image').length,bytes:request.length,updatedPolicy:fs.readFileSync(arg('--system-prompt-file'),'utf8').includes('UPDATED-POLICY')}));return;
  }
+ if(request.includes('api-error-')){apiError(Number(/api-error-(\d+)/.exec(request)[1]));return;}
+ // An error result that is not an API error.
+ if(request.includes('plain-error')){send({type:'result',subtype:'error_during_execution',is_error:true,errors:['fixture failure'],modelUsage:{},permission_denials:[]});return;}
  if(request.includes('question-card')) {
   // Four questions, one 700-character question, or a card the desktop can show.
   const q=title=>({title,options:['Yes','No']});
   const args={questions:request.includes('question-card-four')?['A?','B?','C?','D?'].map(q):request.includes('question-card-long')?[q('L'.repeat(700)+'?')]:[q('A?'),q('B?')]};start();
-  send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_card',name:'mcp__chatgpt__request_user_input_async',input:args}]}});
+  assistant([{type:'tool_use',id:'toolu_card',name:'mcp__chatgpt__request_user_input_async',input:args}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   text('CARD '+JSON.stringify(await client.callTool({name:'request_user_input_async',arguments:args})));return;
  }
  if(request.includes('sleep-tool')) {
   // A host sleep the desktop never answers, as after a Stop in the desktop.
   const args={duration_ms:50};start();
-  send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_sleep',name:'mcp__chatgpt__clock_sleep',input:args}]}});
+  assistant([{type:'tool_use',id:'toolu_sleep',name:'mcp__chatgpt__clock_sleep',input:args}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   busy=true;await client.callTool({name:'clock_sleep',arguments:args}).catch(()=>{});busy=false;text('SLEPT');return;
  }
  if(request.includes('slow-response')){start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'waiting'}});return;}
- if(request.includes('invoke-tool')||request.includes('racing-tool')||request.includes('timeout-tool')||request.includes('stop-after-tool')){
+ if(request.includes('invoke-tool')||request.includes('racing-tool')||request.includes('timeout-tool')||request.includes('stop-after-tool')||request.includes('tool-then-api-error')||request.includes('abort-on-sigint')){
   const args={input:'text("hello");\ntext(42);'};start();
   const early=request.includes('racing-tool')?client.callTool({name:'exec',arguments:args}):null;
   if(early)await new Promise(r=>setTimeout(r,150));
-  send({type:'assistant',message:{model,content:[{type:'tool_use',id:'toolu_fixture',name:'mcp__chatgpt__exec',input:args}]}});
+  assistant([{type:'tool_use',id:'toolu_fixture',name:'mcp__chatgpt__exec',input:args}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   let result;busy=true;
-  try {result=await(early??client.callTool({name:'exec',arguments:args},undefined,request.includes('timeout-tool')?{timeout:150}:undefined));}
-  catch(error){busy=false;text('NATIVE RETRY THAT MUST NOT BE LOST');return;}
+  // Like Claude Code, an interrupt while a tool runs cancels the MCP call, records it as rejected and exits.
+  const abort=new AbortController();
+  if(request.includes('abort-on-sigint'))process.on('SIGINT',()=>{abort.abort();setTimeout(()=>process.exit(0),100);});
+  try {result=await(early??client.callTool({name:'exec',arguments:args},undefined,request.includes('timeout-tool')?{timeout:150}:{signal:abort.signal}));}
+  catch(error){busy=false;if(abort.signal.aborted)return;text('NATIVE RETRY THAT MUST NOT BE LOST');return;}
   busy=false;
+  if(request.includes('tool-then-api-error')){if(!request.includes('unstarted'))attachQueued();apiError(429);return;}
   if(request.includes('stop-after-tool')) {process.on('SIGINT',()=>setTimeout(()=>process.exit(130),250));start();event({type:'content_block_start',index:0,content_block:{type:'text',text:'waiting after tool'}});return;}
   if(JSON.stringify(queued).includes('think-only')) {
    // Opus answering the message only in thinking, then calling the next tool.
    queued.splice(0);const next={input:'text("next");'};start();
    event({type:'content_block_start',index:0,content_block:{type:'thinking',thinking:''}});
    event({type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'Got it, switching to the other worker.'}});
-   send({type:'assistant',message:{model,content:[{type:'thinking',thinking:'Got it, switching to the other worker.'},{type:'tool_use',id:'toolu_next',name:'mcp__chatgpt__exec',input:next}]}});
+   assistant([{type:'thinking',thinking:'Got it, switching to the other worker.'},{type:'tool_use',id:'toolu_next',name:'mcp__chatgpt__exec',input:next}]);
    event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
    busy=true;await client.callTool({name:'exec',arguments:next});busy=false;text('DONE');return;
   }

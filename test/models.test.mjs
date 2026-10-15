@@ -83,3 +83,10 @@ test('the bridge and the Python setup build the same catalog entries and names',
  assert.deepEqual(node.map(m=>m.display_name),['Claude Fable 5.5','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5']);
  assert.match(node[0].model_messages.instructions_template,/^You are Claude Fable 5\.5, running as the main assistant/);
 });
+
+test('GPT\'s none and minimal effort map to the lowest Claude effort; other unknown levels are refused',async()=>{
+ const {effortFor}=await import('../src/models.mjs');
+ const model={display_name:'Claude Test',efforts:['low','medium','high'],default_effort:'medium'};
+ assert.equal(effortFor(model,'minimal'),'low');assert.equal(effortFor(model,'none'),'low');
+ assert.throws(()=>effortFor(model,'ultra'),e=>e.statusCode===400);
+});

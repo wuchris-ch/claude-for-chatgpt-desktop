@@ -37,12 +37,13 @@ test('attachments count toward the request window, and the oldest earlier images
  const body={input,tools:[]};
  assert.throws(()=>assertModelInputFits(body),error=>error.statusCode===413);
  const bounded=boundToolImages(input,0,0,Buffer.byteLength(JSON.stringify({...body,input:[]})));
- assert.equal(bounded.userCutoff,3);assert.equal(bounded.cutoff,5);
+ // The screenshot pasted in the current turn stays; older stills give way.
+ assert.equal(bounded.userCutoff,2);assert.equal(bounded.cutoff,8);
  assert.equal(bounded.input[1].content[0].text,'Screenshot at /tmp/a.png');
  assert.match(bounded.input[1].content[1].text,placeholder);assert.match(bounded.input[1].content[2].text,placeholder);
- assert.match(bounded.input[3].content[1].text,placeholder);
+ assert.equal(bounded.input[3],input[3]);
  assert.match(bounded.input[5].output[1].text,/Earlier tool image .* omitted/);assert.equal(bounded.input[5].output[0].text,'still 0');
- for(let i=5;i<12;i++)assert.equal(bounded.input[5+i*2].output[1],input[5+i*2].output[1]);
+ for(let i=8;i<12;i++)assert.equal(bounded.input[5+i*2].output[1],input[5+i*2].output[1]);
  assert.ok(Buffer.byteLength(JSON.stringify({...body,input:bounded.input}))<=12*1024*1024);
  const again=boundToolImages([...input,...step(12)],bounded.cutoff,bounded.userCutoff);
  assert.equal(again.cutoff,bounded.cutoff);assert.equal(again.userCutoff,bounded.userCutoff);
@@ -59,4 +60,23 @@ test('attachments for the current request and the newest tool image stay when ea
  assert.equal(bounded.input.at(-1),current);assert.equal(bounded.input.at(-2).output[1],input.at(-2).output[1]);
  const earlier=boundToolImages(input.slice(0,-1).concat({...current,content:current.content.slice(0,2)}));
  assert.equal(earlier.userCutoff,4);assert.equal(earlier.input[8],input[8]);assert.equal(earlier.input[10],input[10]);
+});
+
+test('screenshots the user attached stay for the whole turn, while Claude takes its own',()=>{
+ // Four attachments, then Claude's own screenshots fill the window mid-turn.
+ const earlier={type:'message',role:'user',content:[{type:'input_text',text:'old screenshot'},png(2,'old')]};
+ const answer={type:'message',role:'assistant',content:[{type:'output_text',text:'seen'}],phase:'final_answer'};
+ const now={type:'message',role:'user',content:[{type:'input_text',text:'compare these with the live page'},png(3.5,'a'),png(3.5,'b'),png(3.5,'c'),png(3.5,'d')]};
+ const commentary={type:'message',role:'assistant',content:[{type:'output_text',text:'Taking a screenshot.'}],phase:'commentary'};
+ const shot=i=>[{type:'custom_tool_call',call_id:'c'+i,name:'exec',input:'screenshot'},{type:'custom_tool_call_output',call_id:'c'+i,output:[{type:'input_text',text:'page '+i},png(2,'t'+i)]}];
+ const input=[earlier,answer,now,commentary,...shot(1),...shot(2),...shot(3)];
+ const bounded=boundToolImages(input);
+ assert.equal(bounded.input[2],now);
+ assert.match(bounded.input[0].content[1].text,placeholder);
+ assert.match(bounded.input[5].output[1].text,/Earlier tool image .* omitted/);
+ assert.equal(bounded.input.at(-1).output[1],input.at(-1).output[1]);
+ // After a Stop, the next turn's attachments are the current ones.
+ const stopped=[earlier,answer,now,...shot(1),{type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The user interrupted.</turn_aborted>'}]},{type:'message',role:'user',content:[{type:'input_text',text:'next'},png(3.5,'e'),png(3.5,'f'),png(3.5,'g')]}];
+ const after=boundToolImages(stopped);
+ assert.ok(after.userCutoff>=2);assert.equal(after.input.at(-1),stopped.at(-1));
 });

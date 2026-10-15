@@ -82,6 +82,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 - The in-app browser, computer control, terminal, file edits, plugins and connectors, with the app's approvals and tool cards.
 - Images, edits, regenerate, helper agents, review mode, chat titles and inline visuals.
+- Chats you drag in or @-mention, messages between threads, goals and automations.
 - Message Claude while it works, even mid-reply. It answers you before its next step and carries on.
 - Stop, then continue where it left off.
 - A question card the app can't show goes back to Claude with the reason, so it asks in a form you can see.
@@ -100,12 +101,12 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 165 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 201 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
 - **macOS only.** Tested with ChatGPT 26.1007.71326 (Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.300 and Node.js 24.21. A later app or Claude Code release can need an update here.
-- **Local tasks only.** Cloud tasks, voice, image generation and other OpenAI-hosted features stay with GPT. OpenAI-hosted tools, such as GPT's built-in web search, are left out of Claude's tools.
+- **Local tasks only.** Cloud tasks, image generation and other OpenAI-hosted features stay with GPT. Voice conversations run on OpenAI's voice model, which hands tasks to the selected Claude model. OpenAI-hosted tools, such as GPT's built-in web search, are left out of Claude's tools.
 - **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. The setting is in the shared `~/.codex/config.toml`, so the Codex CLI and IDE extension also go through the bridge. The uninstall command works even when the service or its folder is gone. Picker mode needs a ChatGPT sign-in, doesn't use proxy settings, and isn't meant for ChatGPT workspaces with data-residency routing.
 - **GPT's summaries are encrypted for GPT.** If a chat that GPT compacted switches to Claude, Claude gets the messages after the summary and a note that it's unavailable.
 - **Helper agents** whose model family differs from their parent's are untested.
@@ -320,7 +321,7 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 
 - **Prompts.** The app's base prompt is written for Codex. The bridge renames its identity lines for the selected Claude model and tells Claude to ignore Claude Code's own working-directory note. Developer messages before the conversation become the system prompt. Notes the app adds later, such as the date, the open page or an interrupted turn, reach Claude where they occur, so a note does not restart a tool cycle or invalidate the prompt cache.
 - **Patches and host habits.** GPT's `apply_patch` output is constrained by a grammar that MCP cannot carry, so the bridge adds a written patch format guide, plus notes on escaping inside JavaScript and on the shared output budget of an `exec` cell. It also passes on host habits found by benchmarking: render PDFs to images in a temporary folder, keep long jobs in the foreground, and avoid `rm -rf`, which the app refuses.
-- **Sessions.** Between user turns Claude Code resumes the saved session. Before resuming, the bridge checks the app's transcript against what the session saw. Edits, undo, regeneration and failed turns rebuild from the app's transcript; a turn stopped by the user or cut off by a bridge restart resumes its native session. While Claude thinks or writes a long tool call, the bridge sends a no-op event every 10 seconds so the app's stall timer does not fire.
+- **Sessions.** Between user turns Claude Code resumes the saved session. Before resuming, the bridge checks the app's transcript against what the session saw. Edits, undo, regeneration and unexpected failures rebuild from the app's transcript. A turn stopped by the user, cut off by a bridge restart, ended by an API error such as an overload or a usage limit, or cut off when Claude Code exits while the app runs a tool resumes its native session; a Stop before Claude Code has started waits for it to start, so the message is recorded once. When the user edits or withdraws a stopped message whose turn sent no tool call, Claude Code resumes at the end of the last completed turn and drops the stopped one. While Claude thinks or writes a long tool call, the bridge sends a no-op event every 10 seconds so the app's stall timer does not fire.
 - **Model switching.** Switching Claude models between turns resumes the same native session on the new model; that first request cannot reuse the previous model's cache. If GPT answered in between, its messages and tool activity are passed to the resumed session as history. A compaction keeps the model the session ran on, so its cache still applies.
 - **WebSocket relay.** The bridge connects to OpenAI during the app's handshake, so the headers the app reads from it (turn routing, server model) arrive unchanged, then routes each `response.create` by model. For Claude it rebuilds the full input from the increments the app sends after the first request, answers prewarm requests without inference, and treats `response.interrupt` as a Stop. A Claude compaction summary is a sealed item only the bridge can open, so it is turned back into text before a GPT request leaves for OpenAI.
 
@@ -329,8 +330,8 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 ## Development
 
 ```sh
-npm test               # 165 tests with stand-ins for Claude Code and OpenAI
-node e2e/live.mjs      # fifteen short checks with real Claude Code
+npm test               # 201 tests with stand-ins for Claude Code and OpenAI
+node e2e/live.mjs      # eighteen short checks with real Claude Code
 ```
 
 ## License

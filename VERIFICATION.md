@@ -2,7 +2,74 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, and 0.3.7 fixes from an adversarial review of the whole project. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, and 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding. The newest checks come first.
+
+## Release 0.3.8, checked October 14, 2026
+
+Four reviews drove the ChatGPT app's own runtime (0.162.0-alpha.17.2) through the bridge: one fuzzing every request shape it sends, one running tool flows with real Claude, one on images, inline visuals and voice, and one cataloguing the app's agent features and what each sends to the model. Their fixes, and a change that resumes the native session where 0.3.7 rebuilt it, are below. Each new test fails on 0.3.7 unless noted.
+
+### Resuming the native session instead of rebuilding
+
+The separate-window bridge's log from September 24 to October 14, 2026 has 43 rebuilds after an unfinished turn, each of which started a new native session and imported the whole thread as text. Thirty-three came from API errors, Stops or edits right after sending, and restarts. The bridge now resumes the native session in these cases where Claude Code's own transcript shows that is safe, as the separate-window bridge does. Claude Code 2.1.300 was run directly to see what it records in each case.
+
+- **API errors.** Seven turns ended with an API error: 529 Overloaded three times in one thread within 8 minutes, the usage limit three times, and an expired login once. Claude Code records the turn's input, then a synthetic message with the error, and on resume leaves the error message out of the request, so the model sees the input once. The bridge now saves such a turn like a Stop, with the status, and the next request resumes with a note that the attempt ended with an API error, that the user did not stop it, and that the conversation up to the error is intact. A mid-turn message Claude Code had added to the conversation is not sent again; one it never started is. Other errors, such as a bridge failure, still rebuild.
+- **A Stop before Claude Code reports init.** Claude Code records the prompt just before init, and a signal earlier than that leaves nothing (6 of 6 trials from 0 to 423 ms after start). Of 3 such Stops in the log, 1 had the prompt recorded and 2 did not. Putting the session record back as it stood before the turn, as first tried for this release, could therefore send a message Claude Code had already recorded a second time. A Stop before init now waits for init, at most 10 seconds, then stops Claude Code, so the message is recorded exactly once and the turn resumes like any stopped turn. Over 2,137 starts, the median time to init was 0.43 seconds and the 99th percentile 3.0 seconds.
+- **A stopped message the user edits or withdraws.** In 9 rebuilds with a saved stop, the next request no longer contained the stopped turn, because the user had edited or withdrawn its message. All 9 followed a completed turn and sent no tool call to the host. The bridge now sends each prompt with a uuid and records the last assistant entry of each completed turn. When the request extends the conversation as it stood before the stopped turn and adds only new messages and developer notes, Claude Code resumes at that entry with `--resume-session-at` and drops the stopped turn with `--resume-drops-turn`, so Claude sees what the app shows and the cache covers everything before it. Claude Code refuses, before init and without writing anything, if what it would drop is not exactly that turn; the same request then rebuilds. A stopped turn that sent a tool call to the host still rebuilds.
+- **Claude Code exiting first during a restart.** In 3 restarts Claude Code was signalled before the bridge while the host ran a tool, so no stop was saved. Terminated, Claude Code records the waiting call as failed with "MCP server is not connected"; interrupted, it cancels the call and records it as rejected. The bridge now saves the turn when Claude Code exits on its own or cancels a call the host is running, and the host's result resumes it with a note that the error or rejection came from the exit, not from the host or the user. Bridge shutdown now stops every session before waiting on any, so sessions waiting for init do not wait in turn.
+
+New fixture tests, each of which fails on the source before this change:
+
+- An API error resumes when the app retries the request, a message sent after one follows the note, and an error that is not an API error still rebuilds.
+- An API error after a tool result and a mid-turn message resumes without sending either again, and a mid-turn message Claude Code never started is sent again.
+- A Stop before init stops Claude Code at init, the message is recorded once, and the next turn resumes. An init that never comes ends after the wait, and the next request rebuilds.
+- A withdrawn message is dropped from the native session, also when it was stopped before init, and a refused drop rebuilds within the same request.
+- Claude Code terminated or interrupted while the host runs a tool saves the turn, and the host's result resumes it after a bridge restart.
+- Bridge shutdown stops every starting session before waiting on any, and each records its stop at init.
+- The resume notes for an API error and an exit, and when a request counts as a withdrawn message.
+
+One more guards the fallback: a withdrawn message whose turn sent a tool call to the host is rebuilt. It also passes on the earlier source, which always rebuilt, and fails when its guard is removed. Each other part of the change was also reverted on its own, and a test above failed each time. The 0.3.7 tests for requests dropped at once over HTTP and WebSocket now also check that each process that started is stopped at init, and the test for a Stop before init in `test/edge-cases.test.mjs` now expects the stopped message to be recorded once and resumed.
+
+On October 14, 2026, `node e2e/live.mjs resume` ran with Claude Code 2.1.300 on the `claude-haiku` entry at low effort, with API errors from a local pass-through proxy. 3 of 3 checks passed in 6 completed Claude turns, with no rebuild and no bridge error apart from the injected one: a 529 retry resumed the session, a Stop before init was stopped at init and the next turn resumed, and an edited story request was dropped with `--resume-session-at`. Each answer used a code word given in the first turn, and on the active branch of Claude Code's transcript each message appeared once and the withdrawn one not at all. Asked whether it had been asked for a story, Haiku answered "you did not ask me for any story".
+
+### Desktop features
+
+- **Messages from other threads.** `send_message_to_thread`, and a thread started by `create_thread` or `handoff_thread`, deliver their message as a tool output with no `call_id`. One that arrived while Claude waited on a tool was dropped without a trace; between turns it rebuilt the session and showed the message as an old tool result with `call_id="undefined"`; on a new thread it was imported as history. Such an output is now new input, shown as a `<host_tool_output>` from the named tool. With real Sonnet, a mid-turn message and a created thread both reached Claude.
+- **Context from MCP apps and widgets.** The app injects it before a turn as a call named `untrusted_input` and its output. Claude was told another model had continued the conversation, and a new thread was imported as history. It is now new input.
+- **Extra exec outputs.** Code mode's `notify()` records a second output for the same exec call, and only the first reached Claude: real Haiku answered that the notified value "is not in the returned output". All outputs for a call are now merged in order.
+- **A Stop during a host tool.** The app now records the stopped call as "aborted by user" and adds a `<turn_aborted>` note. The bridge counted the aborted output as the tool's result, so the next message reached the old tool cycle as a mid-turn message. A new `<turn_aborted>` note now ends the cycle, and the turn resumes as a stopped turn.
+- **Exec-only tools.** The exec description documents 61 nested tools, including the app's own (`mcp__codex_app__…`), MCP server tools and the goal tools. The note that names tools Claude must call from exec covered five; it now covers every documented one. A goal continuation, which tells the model to "call update_goal", also carries a one-line note that the goal tools run inside exec: Haiku called `update_goal` at the top level first in 3 of 3 goal runs, and from exec in 4 of 4 with the note. Every goal run, on Sonnet, Haiku and Opus, ended with a valid `update_goal` and none looped.
+- **Content the bridge could not render.** A GPT refusal, an unknown content part, or an image held in the user's ChatGPT files failed every later request in the thread. Through the app's runtime, all five Claude turns after a ChatGPT-files image failed. They are now shown as text, with long values left out.
+
+### Picker mode
+
+- **Identity.** In a thread that started on GPT, the runtime keeps GPT's base prompt, so Claude's system prompt opened "You are Codex, an agent based on GPT-6". That line is now replaced with the selected Claude model's identity.
+- **Web search.** With web search turned on, Claude was told it had `web__run` inside exec, which picker mode does not provide. Real Claude spent four tool calls looking for it. Search is now mentioned only when the request offers it.
+- **A renamed model.** The first process to report a newer version behind an alias renamed the model, so every session waiting on a tool result for that alias saw changed instructions and rebuilt once. A running process now keeps the name it started with.
+- **Effort.** GPT's `none` and `minimal` effort, carried over when a thread switches to Claude, got an error; they now map to the model's lowest effort.
+- **Usage warnings.** Claude Code carries a session's usage totals across `--resume`, so switching Claude models logged a false `other_model_usage`. Models the session ran on before are now expected.
+
+### Images and visuals
+
+- **Fenced visuals.** The app's visualize skill shows the reference inside a ```` ```text ```` fence, and real Sonnet copied the fence in 1 of 2 runs, so no visual was drawn. A plain fence that holds nothing but one reference to an existing file now becomes that reference; fences with code or other content stay as written.
+- **Images from GPT's turns.** When Claude took a thread back from GPT, Claude Code's copies of the images sent to GPT looked like new attachments: real Haiku opened one with `view_image` and said it came with the new message. The replayed turns now carry the same image note as an import, and Haiku then placed the image correctly.
+- **Attachments mid-turn.** Once Claude's own screenshots filled the request window, the images the user had just attached gave way first (2 of 4 kept). The current turn now ends at the last final answer or the app's Stop note, so all 4 stay and older screenshots give way.
+- Sizes from 1x1 to 8000x8000 and 16.5 MB, PNG, JPEG, WebP, animated GIF, 22 images in one message, corrupt files, HEIC and SVG all behaved correctly, and so did several visuals in one answer, CRLF line ends, split deltas and a 30 MB HTML file.
+
+### Voice
+
+Voice with a Claude model selected hands its request to the model as an ordinary background turn, which worked with real Claude and resumed without a rebuild. Dictation and call setup are fetched by the app itself and never reach the bridge. The gateway relays the realtime routes with their path, query, subprotocols, headers, binary frames and a 20 MB frame intact.
+
+### Other
+
+- A state folder given as a relative path, such as `CLAUDE_BRIDGE_RUNTIME=runtime`, broke every Claude turn, because Claude Code runs in another folder; the app retried 10 times, each starting a process and a rebuild. The path is now made absolute.
+
+### Automated tests in 0.3.8
+
+201 tests pass: 167 Node tests and 34 Python tests. New in 0.3.8, beyond the resume tests above: a message from another thread mid-turn, between turns and as a created thread's task; MCP app and widget context on a running and a new thread; every output of one exec call; a Stop during a host tool followed by a new message; the exec-only note covering every documented nested tool, and the goal note; a GPT refusal, unknown content parts and a ChatGPT-files image; the identity line in a GPT-started thread; web search mentioned only when offered; a renamed alias keeping a waiting session; GPT's lowest efforts; a fenced visual; images from GPT's turns; attachments kept mid-turn; and a relative state folder.
+
+### Live checks in 0.3.8
+
+On October 14, 2026, with Claude Code 2.1.300, `node e2e/live.mjs` passed 18 of 18 with no bridge errors: the four models, a tool call, a mid-turn message, an image, a model switch, Stop then continue, compaction at a turn boundary and mid-turn, the time note, a message sent mid-response, an inline visualization, an abandoned tool call, and the three resume checks. The reviews above add 62 turns through the app's runtime with real Claude across shell, patches, helper agents, question cards, Stops at six points, mid-turn messages, GPT and Claude switching after GPT searches, four kinds of compaction, bridge restarts and forks, with no errors, hung processes or unexpected rebuilds.
 
 ## Release 0.3.7, checked October 14, 2026
 

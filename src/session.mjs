@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userTurn, timeNote, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, ResponseStream, CompactionStream, COMPACTION_REQUEST} from './protocol.mjs';
+import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 
@@ -31,6 +31,11 @@ export function saveToolSet(stateDir,tools) {
 // How long a mid-turn message may wait for Claude Code to confirm it queued,
 // and the longest thought shown when Claude answered one only in thinking.
 const STEER_CONFIRM_MS=5000,ACK_THINKING_MAX=600;
+// Claude Code records a turn's input just before it reports init: a median of
+// 0.43 s and 3.0 s at the 99th percentile over 2,137 starts in the
+// separate-window bridge's log from September 24 to October 14, 2026. A Stop
+// before then waits this long for init.
+const INIT_WAIT_MS=10000;
 // The desktop accepted an async question card with four questions, one of them
 // 1,100 characters long, and drew nothing, so the user never saw it. Its other
 // question cards allow three; GPT's questions stay under about 460 characters.
@@ -51,7 +56,7 @@ export class Session {
   constructor(bridge, key) {
     this.bridge = bridge; this.key = key; this.id = digest(key); this.file = path.join(bridge.stateDir, `${this.id}.json`);
     this.record = this.load();
-    this.pending = new Map(); this.nativeCalls = []; this.results = new Map(); this.textIndices = []; this.tools = [];this.callWaiters=new Set();this.queued=new Map();this.ack=null;
+    this.pending = new Map(); this.nativeCalls = []; this.results = new Map(); this.textIndices = []; this.tools = [];this.callWaiters=new Set();this.queued=new Map();this.steers=new Map();this.ack=null;
     this.lastUsed=Date.now();
   }
   // A record that cannot be read is set aside, and the thread is imported
@@ -74,8 +79,9 @@ export class Session {
     this.mcp.setRequestHandler(ListToolsRequestSchema, async()=>({tools:this.tools.map(({name,description,inputSchema})=>({name,description,inputSchema,_meta:{'anthropic/maxResultSizeChars':MAX_RESULT_CHARS}}))}));
     this.mcp.setRequestHandler(CallToolRequestSchema, async(req,extra)=> {
       const {name, arguments: args={}} = req.params;
+      let call;
       try {
-        const call = await this.matchCall(name,args,extra.signal);
+        call = await this.matchCall(name,args,extra.signal);
         if(extra.signal.aborted)throw new Error('Tool request cancelled.');
         if(this.results.has(call.id)) return this.takeResult(call.id);
         return await new Promise((resolve,reject)=> {
@@ -84,7 +90,17 @@ export class Session {
           this.pending.set(call.id,()=> {extra.signal.removeEventListener('abort',abort);resolve(this.takeResult(call.id));});
         });
       } catch(error) {
-        if(this.mcp===relay&&!this.stopping)this.fail('Tool relay interrupted: '+error.message);
+        // Claude Code cancels a call the host is running when it is
+        // interrupted from outside, as by a restart that signals it before
+        // the bridge. It records the call as rejected, so the turn is saved
+        // as stopped and the host's result goes to the resumed session.
+        if(this.mcp===relay&&!this.stopping) {
+          const waiting=extra.signal.aborted&&call?.emitted&&!this.stream&&this.ready&&this.record.inflight;
+          if(waiting&&this.child)this.cancel(CLAUDE_EXITED);
+          // The bridge closing the relay after Claude Code exited on its own,
+          // which already saved the turn.
+          else if(!(waiting&&this.record.stop))this.fail('Tool relay interrupted: '+error.message);
+        }
         throw error;
       }
     });
@@ -109,18 +125,34 @@ export class Session {
     this.log(reason,{source:'desktop_transcript'});
     const child=this.child;
     if(child){this.cancel(reason);await this.exiting;}
-    this.pending.clear();this.results.clear();this.nativeCalls=[];this.resumeItems=null;
+    this.pending.clear();this.results.clear();this.nativeCalls=[];this.resumeItems=null;this.truncate=null;
     this.record={claudeId:randomUUID(),seen:[],started:false,recoveredFrom:this.record.claudeId,lastReplyAt:this.record.lastReplyAt};this.save();
   }
   // A stopped turn leaves a consistent native transcript. Claude Code keeps the
   // partial answer and marks unanswered tool calls as interrupted, even after
   // SIGKILL, so resuming it keeps the prompt cache. Rebuilding from the desktop
-  // transcript rewrote the cache, 70k to 495k tokens per Stop.
+  // transcript rewrote the cache, 70k to 495k tokens per Stop. A turn that
+  // ended with an API error or because Claude Code exited is saved the same way.
   async resumeOrRecover(body) {
     const stop=!body.__bridge_compaction&&this.record.stop;
     this.resumeItems=stop?afterStop(body.input,this.record.history,stop.seen,this.record.delivered):null;
-    if(this.resumeItems)this.log('stopped_turn_resumed',{reason:stop.reason,items:this.resumeItems.length,steer:resampledSteer(this.resumeItems,stop.reason)});
-    else await this.reset('interrupted_turn_recovery');
+    if(this.resumeItems){this.log('stopped_turn_resumed',{reason:stop.reason,items:this.resumeItems.length,steer:resampledSteer(this.resumeItems,stop.reason)});return;}
+    // A request that no longer contains the stopped turn, as when the user
+    // edits or withdraws its message, rebuilt the session 9 times in the
+    // separate-window bridge's log from October 5 to 13, 2026. When the request
+    // still extends the conversation as it stood before that turn, Claude Code
+    // resumes there and drops the turn, so Claude sees what the desktop shows,
+    // from the cache. Claude Code refuses if anything else would be dropped. A
+    // turn that reached the host with a tool call, and so may also hold
+    // mid-turn messages, is rebuilt instead.
+    const settled=this.record.settled;
+    const added=stop&&settled&&this.record.prompt&&!stop.sent&&!this.record.delivered?.length?afterWithdrawn(body.input,settled.history,this.record.seen):null;
+    if(added) {
+      this.truncate={at:settled.at,prompt:this.record.prompt};this.record.history=settled.history;
+      this.log('withdrawn_turn_dropped',{reason:stop.reason,items:added.length});
+      return;
+    }
+    await this.reset('interrupted_turn_recovery');
   }
   // When agent or user messages arrive while a response streams, the desktop
   // drops that response's tool calls, which never ran, and samples again with
@@ -150,7 +182,7 @@ export class Session {
     this.child.stdin.write(JSON.stringify({type:'user',uuid,message:{role:'user',content:steeringPrompt(fresh)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
     this.log('user_steering',{messages:fresh.length});
     if(fresh.some(x=>x.type==='message'&&x.role==='user'))this.ack={thinking:''};
-    const keys=fresh.map(inputKey);
+    const keys=fresh.map(inputKey);this.steers.set(uuid,keys);
     return new Promise(resolve=>{
       const timer=setTimeout(()=>{if(this.queued.delete(uuid)){this.log('steering_unconfirmed',{});resolve();}},STEER_CONFIRM_MS);timer.unref();
       this.queued.set(uuid,{keys,release:()=>{clearTimeout(timer);this.queued.delete(uuid);resolve();}});
@@ -192,7 +224,7 @@ export class Session {
     // The record was last saved when the session's turn ended or was stopped. A
     // turn stopped just now last used the cache at its latest response.
     const cold=Date.now()-(used??fs.statSync(path.join(this.bridge.stateDir,`${id}.json`)).mtimeMs)>CACHE_TTL_MS;
-    return {from:id.slice(0,12),claudeId:record.claudeId,model,effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold,stopped:record.inflight?record.stop:null};
+    return {from:id.slice(0,12),claudeId:record.claudeId,model,ranModels:record.ranModels??[],effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold,stopped:record.inflight?record.stop:null};
   }
   // After a compaction in the middle of a turn, the desktop continues in a new
   // context window and never answers the old session's pending tool call, so
@@ -202,13 +234,15 @@ export class Session {
     if(turn?.child&&!turn.stream&&!turn.accepting)turn.cancel('compacted_mid_turn');
   }
   takeResult(id) {const r=this.results.get(id);this.results.delete(id);this.pending.delete(id);return r;}
-  deliverResult(item) {
-    if(!this.nativeCalls.some(c=>c.id===item.call_id)) throw new Error(`Unknown tool result ${item.call_id}; cannot safely continue this tool cycle.`);
-    if(this.record.delivered?.includes(item.call_id)) return;
-    const result=mcpResult(item.output);
-    this.record.delivered ??= []; this.record.delivered.push(item.call_id);
-    this.results.set(item.call_id,result);this.pending.get(item.call_id)?.();
-    this.log('tool_result',{call_id:item.call_id});
+  // items are every output the desktop recorded for one call, in order.
+  deliverResult(items) {
+    const id=items[0].call_id;
+    if(!this.nativeCalls.some(c=>c.id===id)) throw new Error(`Unknown tool result ${id}; cannot safely continue this tool cycle.`);
+    if(this.record.delivered?.includes(id)) return;
+    const result={content:items.flatMap(item=>mcpResult(item.output).content)};
+    this.record.delivered ??= []; this.record.delivered.push(id);
+    this.results.set(id,result);this.pending.get(id)?.();
+    this.log('tool_result',{call_id:id,...(items.length>1?{outputs:items.length}:{})});
   }
   async accept(body,res,onComplete) {
     if(this.accepting)throw new Error('This conversation is already accepting a request.');
@@ -223,7 +257,7 @@ export class Session {
   async acceptRequest(body,res,onComplete,gone) {
     if(this.exiting) await this.exiting;
     if(this.stream && !this.stream.finished) throw new Error('This conversation already has an active response.');
-    this.stopping=false;this.resumeItems=null;
+    this.stopping=false;this.resumeItems=null;this.truncate=null;
     // A killed process cannot restore an in-flight MCP promise. A stopped turn
     // resumes its native session. Anything else recovers from the host's
     // authoritative transcript in a new one, preserving observed tool results
@@ -238,12 +272,19 @@ export class Session {
     // The desktop keeps one model for a turn. A different model while a
     // native process waits on a tool result restarts from the transcript.
     if(this.child&&this.record.model!==model.slug)await this.reset('model_changed');
-    const prompt=systemPrompt(body,{name:labelFor(model,this.bridge.startedModels?.get(model.slug)),webSearch:this.bridge.webSearch});
-    if(this.child&&this.record.instructions!==digest(prompt))await this.reset('instructions_changed');
+    // The first process to start an alias reports its version, which renames
+    // the model. A process keeps the name it started with, or its next tool
+    // result would look like changed instructions and rebuild the session.
+    const label=()=>this.child&&this.label?this.label:labelFor(model,this.bridge.startedModels?.get(model.slug));
+    const webSearch=this.bridge.webSearch&&offersWebSearch(body.tools);
+    let name=label(),prompt=systemPrompt(body,{name,webSearch});
+    if(this.child&&this.record.instructions!==digest(prompt)){await this.reset('instructions_changed');name=label();prompt=systemPrompt(body,{name,webSearch});}
     // Stop during host tool execution has no open model HTTP stream to abort.
     // A subsequent user message without results abandons that waiting cycle.
-    if(this.child&&!superseded&&!body.input.some(x=>isResult(x)&&this.nativeCalls.some(c=>c.id===x.call_id)&&!this.record.delivered?.includes(x.call_id))&&
-      (body.input.some(x=>isIncoming(x)&&!this.pendingSeen.includes(inputKey(x)))||newNotes(body.input,this.record.history).length)) {
+    // The desktop now records the stopped call as "aborted by user" and notes
+    // the Stop with <turn_aborted>, so that note ends the cycle too.
+    if(this.child&&!superseded&&(userStopped(newNotes(body.input,this.record.history))||!body.input.some(x=>isResult(x)&&this.nativeCalls.some(c=>c.id===x.call_id)&&!this.record.delivered?.includes(x.call_id))&&
+      (body.input.some(x=>isIncoming(x)&&!this.pendingSeen.includes(inputKey(x)))||newNotes(body.input,this.record.history).length))) {
       this.cancel('tool_cycle_interrupted');await this.exiting;await this.resumeOrRecover(body);
     }
     const originalInput=body.input;
@@ -285,13 +326,19 @@ export class Session {
         // Stopped while the message waited: the results go to the resumed session.
         if(this.stream!==activeStream)return;
       }
-      for(const item of results)this.deliverResult(item);
+      // Code mode's notify() records extra outputs for the same exec call.
+      for(const id of new Set(results.map(x=>x.call_id)))this.deliverResult(results.filter(x=>x.call_id===id));
       // With parallel_tool_calls=false, calls from one Claude message are
       // relayed one per response. Claude waits on the held call's MCP result.
       const held=this.nativeCalls.find(c=>!c.emitted);
       if(held)this.emitCalls([held]);
       return;
     }
+    await this.launch({body,originalInput,model,name,prompt,activeStream});
+  }
+  // Starts Claude Code for the request's turn.
+  async launch(context) {
+    const {body,originalInput,model,name,prompt,activeStream}=context;
     this.turnKey=body.__bridge_turn_key;
     let fork=body.__bridge_compaction&&!this.record.started&&body.__bridge_turn_key?await this.compactionFork(originalInput,body.__bridge_turn_key):null;
     if(fork?.reason){this.log('compaction_import',{reason:fork.reason});fork=null;}
@@ -309,14 +356,16 @@ export class Session {
       if(!fresh.length) throw new Error('No new user input. Replaying a completed request would duplicate the turn.');
       const other=otherModelTurns(body.input,this.record.history);
       if(other)this.log('other_model_turns',{items:other.length});
-      input=other?[{type:'text',text:OTHER_MODEL_NOTE},...userInput(other,{replay:true,prefix:false})]:userInput(this.withNotes(body.input,fresh,this.record.history),{prefix:false});
+      input=other?[{type:'text',text:OTHER_MODEL_NOTE},...userInput(other,{replay:true,prefix:false}),...replayImageNote(other,{otherModel:true})]:userInput(this.withNotes(body.input,fresh,this.record.history),{prefix:false});
     } else {
-      const replay=body.input.some(x=>x.role==='assistant'||isResult(x)||['function_call','custom_tool_call'].includes(x.type));
+      const replay=body.input.some(x=>x.role==='assistant'||isCallResult(x)||['function_call','custom_tool_call'].includes(x.type)&&!isHostCall(x));
       input=[...userInput(body.input,{replay}),...(replay?replayImageNote(body.input):[])];
       if(replay)this.log('history_import',{reason:'new_or_compacted_context'});
     }
     // A message the desktop resent mid-response is a mid-turn message, which gets no time note.
     const steered=!fork&&this.resumeItems&&resampledSteer(this.resumeItems,this.record.stop?.reason);
+    // A goal continuation names update_goal, which code mode runs only inside exec.
+    if(!body.__bridge_compaction)input=[...input,...goalToolNote(body.input,body.tools)];
     if(!body.__bridge_compaction&&!steered&&userTurn(body.input))input=[...input,timeNote(Date.now(),this.record.lastReplyAt)];
     this.pendingSeen=[...new Set([...this.record.seen,...users.map(key)])];
     // A fork keeps the session's model and effort: changing either misses the cache.
@@ -334,11 +383,16 @@ export class Session {
     fs.writeFileSync(mcpFile,JSON.stringify(config),{mode:0o600});
     this.record.instructions=digest(fork?.prompt??prompt);this.record.effort=effort;this.record.model=runModel.slug;
     this.schema=outputSchema(body);
+    // Claude Code 2.1.300 resumes at a given entry and drops what follows. It
+    // refuses when the dropped part holds anything but the named turn, such as
+    // a queued message or another turn.
+    const truncate=this.truncate;this.truncate=null;
     const args=['-p','--model',runModel.claude_model,...(effort?['--effort',effort]:[]),'--input-format','stream-json','--output-format','stream-json','--verbose','--include-partial-messages',
       '--tools','','--strict-mcp-config','--mcp-config',mcpFile,'--allowedTools','mcp__chatgpt__*','--permission-mode','dontAsk',
       '--setting-sources','','--disable-slash-commands','--system-prompt-snapshot','off','--system-prompt-file',systemFile,
       ...(this.schema?['--json-schema',JSON.stringify(this.schema)]:[]),
-      ...(fork?['--resume',fork.claudeId,'--fork-session']:[this.record.started||this.resumeItems?'--resume':'--session-id',this.record.claudeId])];
+      ...(fork?['--resume',fork.claudeId,'--fork-session']:[this.record.started||this.resumeItems?'--resume':'--session-id',this.record.claudeId]),
+      ...(truncate?['--resume-session-at',truncate.at,'--resume-drops-turn',truncate.prompt]:[])];
     const env={...process.env};
     for(const name of Object.keys(env))if((name.startsWith('ANTHROPIC_')||name.startsWith('CLAUDE_')||name.startsWith('CODEX_'))&&!KEEP_ENV.has(name))delete env[name];
     // Once Claude Code has reported the model an alias starts, every internal
@@ -371,10 +425,19 @@ export class Session {
       env.ANTHROPIC_API_KEY=key;
     }
     if(this.stream!==activeStream)return;
-    this.runModel=runModel;this.activeModel=null;
+    // Claude Code carries a session's usage totals across --resume and forks,
+    // so models the session ran on before are expected in them.
+    if(fork)this.record.ranModels=[...new Set([...(this.record.ranModels??[]),...fork.ranModels])];
+    this.runModel=runModel;this.activeModel=null;this.label=name;
     this.child=spawn(this.bridge.claude,args,{cwd:this.bridge.claudeCwd,env,stdio:['pipe','pipe','pipe']});
     this.stopping=false;
     const child=this.child;this.stderr='';this.nativeCalls=[];this.ready=false;this.forked=!!fork;
+    this.steers.clear();this.deferredStop=null;this.lastAssistant=null;this.apiError=null;this.refusal=null;this.truncating=!!truncate;
+    // Where a withdrawn turn returns to: the end of the last completed turn.
+    // A truncating resume keeps the same point.
+    if(!truncate)this.record.settled=!fork&&this.record.started&&!this.record.inflight&&this.record.turnEnd?{history:this.record.history,at:this.record.turnEnd}:null;
+    // Claude Code keeps the uuid of a stream-json message as its transcript entry's uuid.
+    const promptId=randomUUID();this.record.prompt=fork?null:promptId;
     // Until a response completes, the native session has seen this request's input.
     if(!fork){this.record.history=historyStamp(originalInput);this.record.historyWithoutCalls=null;}
     this.record.delivered=[];this.record.stop=null;this.record.inflight=true;this.save();
@@ -386,19 +449,48 @@ export class Session {
     child.on('error',e=>this.fail(e.message));
     this.childDone=new Promise(resolve=>child.once('close',(code,signal)=>{
       if(this.child===child)this.child=null;
-      if(this.stream&&!this.stream.finished)this.fail(`Claude Code exited before completion (${code??signal}). ${this.stderr}`);
+      // Claude Code refused to drop the withdrawn turn, or ended before init:
+      // this request rebuilds instead.
+      const refused=!!truncate&&!this.ready&&!this.stopping&&this.stream===activeStream&&!activeStream.finished;
+      if(refused)this.log('withdrawn_turn_refused',{code,signal,message:(this.refusal||this.stderr).slice(0,300)});
+      else if(this.stream&&!this.stream.finished)this.fail(`Claude Code exited before completion (${code??signal}). ${this.stderr}`);
+      // Claude Code exited on its own while the host ran a tool: 2 of 3 turns
+      // cut off by a restart in the separate-window bridge's log, where the
+      // restart signalled Claude Code 2.5 s before the bridge. It records the
+      // waiting call as failed.
+      else if(!this.stopping&&this.ready&&this.record.inflight&&this.nativeCalls.some(c=>c.emitted&&!this.record.delivered?.includes(c.id)))this.saveStop(CLAUDE_EXITED);
       this.log('claude_exit',{code,signal});
       this.exiting=null;this.lastUsed=Date.now();resolve();
+      if(refused)this.relaunch(context);
     }));
     child.stdin.on('error',e=>this.fail(`Claude input closed: ${e.message}`));
-    child.stdin.write(JSON.stringify({type:'user',message:{role:'user',content:asPrompt(input)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
+    child.stdin.write(JSON.stringify({type:'user',uuid:promptId,message:{role:'user',content:asPrompt(input)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
+  }
+  async relaunch(context) {
+    const {imageCutoff,userImageCutoff,toolSet}=this.record;
+    try {
+      await this.reset('interrupted_turn_recovery');
+      Object.assign(this.record,{imageCutoff,userImageCutoff,toolSet});
+      if(this.stream===context.activeStream&&!context.activeStream.finished)await this.launch(context);
+    } catch(error){if(this.stream===context.activeStream)this.fail(error.message);}
   }
   onEvent(msg) {
-    if(this.stopping)return;
-    if(msg.type==='command_lifecycle'&&msg.state==='queued') {
-      this.queued.get(msg.command_uuid)?.release();
+    if(this.stopping) {
+      // A turn stopped before init: Claude Code has now recorded its input.
+      if(this.deferredStop&&msg.type==='system'&&msg.subtype==='init') {
+        const {reason}=this.deferredStop;this.deferredStop=null;this.ready=true;
+        this.saveStop(reason);this.log('stopped_at_init',{reason});this.stopChild('SIGINT');
+      }
       return;
     }
+    if(msg.type==='command_lifecycle') {
+      if(msg.state==='queued')this.queued.get(msg.command_uuid)?.release();
+      // Claude Code records a queued message once it adds it to the conversation.
+      if(msg.state==='started')this.steers.delete(msg.command_uuid);
+      return;
+    }
+    // Claude Code refuses a truncating resume before init.
+    if(msg.type==='result'&&msg.is_error&&this.truncating&&!this.ready){this.refusal=String(msg.errors?.join(' ')||msg.result||'');this.child?.stdin.end();return;}
     if(['assistant','stream_event','result'].includes(msg.type)&&!(msg.type==='result'&&msg.queued_turn_count>0)&&(!this.stream||this.stream.finished)) {
       this.fail('Claude advanced without an active desktop response. Recovering from the desktop transcript on the next request.');
       return;
@@ -414,6 +506,9 @@ export class Session {
     }
     if(msg.type==='assistant') {
       if(msg.message.model!=='<synthetic>'&&msg.message.model!==this.activeModel)throw modelChanged(msg.message.model,this.activeModel);
+      // Claude Code reports an API error as a synthetic message with the error's kind.
+      if(msg.message.model==='<synthetic>'&&msg.error)this.apiError=msg.error;
+      else if(msg.uuid)this.lastAssistant=msg.uuid;
       for(const c of msg.message.content??[])if(c.type==='tool_use') {
         if(this.schema&&c.name==='StructuredOutput')continue;
         const name=c.name.replace(/^mcp__chatgpt__/, '');const tool=this.tools.find(t=>t.name===name);
@@ -474,16 +569,26 @@ export class Session {
     if(msg.type==='result') {
       // Answers were already checked message by message. Other usage would be
       // Claude Code background work, which the pins above normally prevent.
-      const others=Object.keys(msg.modelUsage??{}).filter(x=>x!==this.activeModel);
+      const others=Object.keys(msg.modelUsage??{}).filter(x=>x!==this.activeModel&&!this.record.ranModels?.includes(x));
       if(others.length)this.log('other_model_usage',{models:others});
-      if(msg.is_error)throw new Error(msg.result||msg.errors?.join('\n')||`Claude failed: ${msg.subtype}`);
+      if(this.activeModel)this.record.ranModels=[...new Set([...(this.record.ranModels??[]),this.activeModel])];
+      if(msg.is_error) {
+        // An API error (an overload, a usage limit, an expired login) rebuilt
+        // the session 7 times in the separate-window bridge's log from
+        // September 24 to October 6, 2026. Claude Code keeps the turn's input
+        // and its queued messages and leaves the error message out of the next
+        // request, so the turn resumes instead.
+        if(this.ready&&this.record.inflight&&!(this.stream instanceof CompactionStream)&&(msg.api_error_status!=null||this.apiError))
+          this.saveStop(API_FAILED,{unseen:[...this.steers.values()].flat(),replied:false,status:msg.api_error_status??null});
+        throw new Error(msg.result||msg.errors?.join('\n')||`Claude failed: ${msg.subtype}`);
+      }
       if(msg.permission_denials?.length)throw new Error('Claude tool relay permission denied.');
       if(msg.queued_turn_count>0){this.log('queued_user_turn',{count:msg.queued_turn_count});return;}
       if(this.schema) {
         if(msg.structured_output===undefined)throw new Error('Claude did not return the requested structured output.');
         const i=this.stream.startText();this.stream.text(i,JSON.stringify(msg.structured_output));this.stream.finishText(i,true);
       }
-      this.record.started=true;this.record.inflight=false;this.record.seen=this.pendingSeen;this.save();this.log('turn_complete',{model:this.activeModel,context_window:msg.modelUsage?.[this.activeModel]?.contextWindow});
+      this.record.started=true;this.record.inflight=false;this.record.seen=this.pendingSeen;this.record.turnEnd=this.lastAssistant;this.save();this.log('turn_complete',{model:this.activeModel,context_window:msg.modelUsage?.[this.activeModel]?.contextWindow});
       const compacted=this.stream instanceof CompactionStream&&!!this.stream.summary.trim();
       this.completeStream();
       if(compacted)this.releaseCompactedTurn();
@@ -542,16 +647,31 @@ export class Session {
     this.childDone.finally(()=>{clearTimeout(term);clearTimeout(kill);});
   }
   fail(message) {this.log('error',{message});this.stream?.fail(message);this.releaseResponse();this.stopChild('SIGTERM');}
+  // What the stopped session saw, so a resume sends only the rest. By default
+  // a mid-turn message Claude Code had not yet queued is sent again on resume.
+  saveStop(reason,{unseen=[...this.queued.values()].flatMap(q=>q.keys),replied=!!this.stream,...detail}={}) {
+    const sent=this.nativeCalls.filter(c=>c.emitted&&!this.record.delivered?.includes(c.id)).length;
+    this.record.stop={reason,seen:this.pendingSeen.filter(k=>!unseen.includes(k)),sent,...detail};if(replied)this.record.lastReplyAt=Date.now();this.save();
+  }
   cancel(reason) {
     this.log('cancel',{reason});
-    // What the stopped session saw, so a resume sends only the rest.
-    if(this.child&&this.ready&&!this.stopping&&this.record.inflight) {
-      const sent=this.nativeCalls.filter(c=>c.emitted&&!this.record.delivered?.includes(c.id)).length;
-      // A mid-turn message Claude Code had not yet queued is sent again on resume.
-      const unqueued=[...this.queued.values()].flatMap(q=>q.keys);
-      this.record.stop={reason,seen:this.pendingSeen.filter(k=>!unqueued.includes(k)),sent};if(this.stream)this.record.lastReplyAt=Date.now();this.save();
+    if(this.child&&!this.stopping&&this.record.inflight) {
+      if(this.ready)this.saveStop(reason);
+      // Claude Code records a turn's input just before it reports init, and a
+      // signal before then leaves nothing. In the separate-window bridge's
+      // log, 3 Stops before init left the input recorded in 1 and not in 2.
+      // Stopping at init leaves it recorded exactly once.
+      else if(!this.forked){this.stream?.end();this.releaseResponse();this.deferStop(reason);return;}
     }
     for(const q of [...this.queued.values()])q.release();
     this.stream?.end();this.releaseResponse();this.stopChild('SIGINT');
+  }
+  deferStop(reason) {
+    const child=this.child;this.stopping=true;this.exiting=this.childDone;this.deferredStop={reason};
+    const timer=setTimeout(()=>{
+      if(this.child!==child||!this.deferredStop)return;
+      this.deferredStop=null;this.log('init_overdue',{});this.stopChild('SIGTERM');
+    },this.bridge.initWaitMs??INIT_WAIT_MS);timer.unref();
+    this.childDone.finally(()=>clearTimeout(timer));
   }
 }
