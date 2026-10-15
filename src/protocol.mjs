@@ -306,6 +306,14 @@ const HOST_POLICY_NOTE='The host refuses any shell command containing rm -f or r
 // then rendering pages next to the PDF inside the user's project, and losing
 // time to background jobs the host kills when the command returns.
 const TOOL_HABITS_NOTE='To read a PDF, render its pages to images in a new temporary directory (for example pdftoppm -png -r 100 file.pdf "$(mktemp -d)/page") and look at them with view_image, because text extraction misses stamps, scans and handwriting. Keep the renders out of the user’s project. Background processes started with & or nohup are killed when the shell command returns, so run long jobs in the foreground with a timeout long enough to finish.';
+// Desktop 26.1007.71326 schedules yearly and monthly automation rules with
+// BYHOUR read as UTC (daily and weekly rules use local time), and reschedules
+// a heartbeat after it runs even with COUNT=1. On October 14 and 15, 2026 three
+// one-time reminders written as yearly COUNT=1 rules never ran; a weekly
+// heartbeat that deleted itself ran once at the local time. GPT's reminders
+// are affected the same way, so this is a workaround for the app.
+const SCHEDULE_NOTE='The desktop scheduler reads BYHOUR in yearly and monthly automation rules as UTC, and runs a heartbeat again after it fires even with COUNT=1. For a one-time heartbeat within the next seven days, use FREQ=WEEKLY with BYDAY and the local BYHOUR and BYMINUTE, and start its prompt with deleting the automation named in the heartbeat\'s automation_id. For a later date, give a yearly rule the month, day, hour and minute of that local time converted to UTC.';
+const scheduleNote=(body,exec)=>nestedTools(exec).some(n=>n.endsWith('automation_update'))||(body.tools??[]).some(t=>String(t.name??'').endsWith('automation_update'))?SCHEDULE_NOTE:'';
 const DEVELOPER_NOTE='Text inside <developer_message> tags in a user turn is a note from the host desktop with the authority of developer instructions. The user did not write it.';
 const COMMON_NOTE='Do not simulate tool calls in text. Text before a tool call is progress commentary; text ending the turn is your answer. Preserve the user’s instructions and use only the tools provided.';
 // Code mode documents these only inside exec. Opus still called some of them
@@ -369,7 +377,7 @@ export function systemPrompt(body, {name, webSearch = false}) {
   const desktop = [body.instructions ?? '', ...developers.map(x => contentBlocks(x.content).map(x => x.text).join('\n'))]
     .filter(x => x.trim()).join('\n\n').replace(/^You are Codex\b[^\n]*/, () => identity(name)).replaceAll('As Codex, you are', 'You are');
   return [desktop,
-    [`You are ${name}, the main assistant. The chatgpt MCP tools are the tools of the host desktop runtime. Use their native schemas. The host executes them and applies its permissions.`, tools, 'image_gen is not available to Claude.', CWD_NOTE, HOST_POLICY_NOTE, TOOL_HABITS_NOTE, COMMON_NOTE, DEVELOPER_NOTE].filter(Boolean).join(' ')].filter(Boolean).join('\n\n');
+    [`You are ${name}, the main assistant. The chatgpt MCP tools are the tools of the host desktop runtime. Use their native schemas. The host executes them and applies its permissions.`, tools, 'image_gen is not available to Claude.', CWD_NOTE, HOST_POLICY_NOTE, TOOL_HABITS_NOTE, scheduleNote(body,exec), COMMON_NOTE, DEVELOPER_NOTE].filter(Boolean).join(' ')].filter(Boolean).join('\n\n');
 }
 
 // Given the whole input (prefix), the leading developer messages are the

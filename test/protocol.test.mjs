@@ -86,6 +86,10 @@ test('system prompt corrects Codex identity and working directory for either too
  assert.match(nested,/exec_command are not top-level tools here, and neither is any other tool the exec description documents, such as mcp__codex_app__set_thread_archived, mcp__figma__get_design_context and clock__curr_time\. Call them only from exec JavaScript as tools\.<name>/);
  const appOnly=systemPrompt({...body,tools:[{type:'custom',name:'exec',description:'### `mcp__codex_app__read_thread`\nRead a thread.'}]},options);
  assert.match(appOnly,/Tools the exec description documents are not top-level tools here, such as mcp__codex_app__read_thread\. Call them only from exec JavaScript as tools\.<name>, for example await tools\.mcp__codex_app__read_thread/);
+ // The timer workaround appears only when the desktop offers its automation tool.
+ const timers=systemPrompt({...body,tools:[{type:'custom',name:'exec',description:'### `exec_command`\nRuns a command.\n\n### `mcp__codex_app__automation_update`\nCreate automations.'}]},options);
+ assert.match(timers,/use FREQ=WEEKLY with BYDAY and the local BYHOUR and BYMINUTE, and start its prompt with deleting the automation named in the heartbeat's automation_id/);
+ assert.doesNotMatch(code,/automation_id/);
  assert.match(code,/Ignore it: the working directory is the cwd in <environment_context>/);
  assert.match(code,/refuses any shell command containing rm -f or rm -rf/);
  assert.match(code,/render its pages to images in a new temporary directory/);assert.match(code,/mktemp -d/);assert.match(code,/killed when the shell command returns/);

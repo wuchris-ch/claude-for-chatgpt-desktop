@@ -4,6 +4,21 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. The newest checks come first.
 
+## Release 0.3.11, checked October 15, 2026
+
+### One-time timers
+
+Desktop 26.1007.71326 runs one-time automations at the wrong time. Its scheduler reads `BYHOUR` in yearly and monthly rules as UTC, while daily and weekly rules use local time. It also schedules a heartbeat again after it runs, even with `COUNT=1`. GPT's reminders are affected the same way, so this is a workaround for the app, not a bridge bug.
+
+Measurements on October 14 and 15, 2026, in America/Vancouver (UTC-7):
+
+- Three one-time heartbeats written as `FREQ=YEARLY;...;COUNT=1` at 1:55 PM, 2:00 PM and 1:32 PM local never ran. Read as UTC, each hour had already passed, so the next run moved to the following year.
+- A yearly heartbeat due at 9:00 AM ran at 2:00 AM. A yearly heartbeat GPT created for 10:00 AM is scheduled for 3:00 AM.
+- Two weekly heartbeats with `COUNT=1` ran at the right local time, then were scheduled again for the next week.
+- A weekly heartbeat at local 3:55 PM whose prompt deleted the automation ran once, at 3:59 PM, and the delete succeeded.
+
+What changed: when the app offers its automation tool, Claude's instructions say to write a one-time heartbeat within the next seven days as a weekly rule at the local time, with a prompt that starts by deleting the automation, and to convert the local time to UTC for a yearly rule further out.
+
 ## Release 0.3.10, checked October 15, 2026
 
 ### OpenAI closing the connection while Claude has it
