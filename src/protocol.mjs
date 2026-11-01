@@ -635,8 +635,10 @@ export class ResponseStream {
     for(const [i,x] of this.output.entries())if(x.type==='web_search_call'&&x.status==='in_progress')this.searchDone(i);
     this.send('response.completed', {response: this.response('completed', usage)});this.onComplete?.(this.frames.join(''));this.end();
   }
+  // A final failure uses a code the app's own provider never retries and shows
+  // as written; with the claude_bridge provider retries are off already.
   fail(message) {
-    this.send('response.failed', {response: {...this.response('failed'), error: {code: 'claude_bridge_error', message}}}); this.end();
+    this.send('response.failed', {response: {...this.response('failed'), error: {code: this.final ? 'invalid_prompt' : 'claude_bridge_error', message}}}); this.end();
   }
   end() {if(this.finished)return; this.finished = true; clearInterval(this.timer); this.res.end();}
 }

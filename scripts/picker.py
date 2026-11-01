@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from bridge_config import DEFAULT_PORT, PROJECT, load_launch, load_models, runtime_dir, source_home
+from bridge_config import DEFAULT_PORT, PROJECT, load_launch, load_models, root_end, runtime_dir, source_home
 
 MARK = '# Added by '+PROJECT+'. Remove with: python3 scripts/picker.py uninstall'
 KEY_LINE = re.compile(r'^[ \t]*openai_base_url[ \t]*=.*$', re.M)
@@ -37,21 +37,6 @@ def gateway_url(port, key):
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
-
-
-def root_end(text):
-    """Offset of the first table header, skipping lines inside multi-line strings."""
-    offset, inside = 0, None
-    for line in text.splitlines(keepends=True):
-        if inside is None and re.match(r'[ \t]*\[', line):
-            return offset
-        for quote in re.findall(r'"""|\'\'\'', line):
-            if inside is None:
-                inside = quote
-            elif quote == inside:
-                inside = None
-        offset += len(line)
-    return len(text)
 
 
 def add_setting(text, url):

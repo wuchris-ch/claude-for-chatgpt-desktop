@@ -102,7 +102,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 223 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 250 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
@@ -140,7 +140,7 @@ flowchart LR
 - **GPT requests** go on to OpenAI as the app sends them, with the app's own login, WebSocket connection and compaction. In a chat where Claude also answered, the bridge turns Claude's summaries into text and drops Claude's item ids, which OpenAI can't read.
 - **Claude requests** are answered by the bridge: one headless Claude Code session per chat, resumed each turn, with the app's tools offered over MCP.
 - **Tool calls** go back to the app as ordinary tool calls. The app applies its approvals, runs the tool and returns the result to Claude.
-- **Nothing is patched.** The app bundle isn't modified, and the bridge has no tools of its own. The separate window works the same way through its own model provider, without the OpenAI relay.
+- **Nothing is patched.** The app bundle isn't modified, and the bridge has no tools of its own. The separate window works the same way, without the OpenAI relay. Its new chats use the app's own provider with a key in the path, because the app shows dictation only on that provider.
 
 ## Compared with similar projects
 
@@ -339,8 +339,9 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 ## Development
 
 ```sh
-npm test               # 201 tests with stand-ins for Claude Code and OpenAI
+npm test               # 250 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # eighteen short checks with real Claude Code
+node e2e/app-runtime.mjs   # the app's own runtime against this bridge, with a placeholder login
 ```
 
 ## License

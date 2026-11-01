@@ -13,13 +13,14 @@ import re
 import secrets
 import shutil
 import subprocess
-from bridge_config import (APP_NAME, DEFAULT_APP, DEFAULT_LABEL, DEFAULT_PORT, PROVIDER_ID,
-                           load_models, runtime_dir, source_home)
-from sync_runtime import refresh_capabilities
+from bridge_config import (APP_NAME, DEFAULT_APP, DEFAULT_LABEL, DEFAULT_PORT, PROJECT, PROVIDER_ID,
+                           load_models, root_end, runtime_dir, source_home)
+from sync_runtime import refresh_capabilities, set_app_provider
 
 # Root settings this profile owns. Per-model context windows and compaction
 # limits live in the model catalog, so global overrides are removed.
-REMOVED_KEYS = ['model_context_window', 'model_auto_compact_token_limit']
+# openai_base_url in the normal profile is for GPT, usually the picker's setting.
+REMOVED_KEYS = ['model_context_window', 'model_auto_compact_token_limit', 'openai_base_url']
 
 
 def drop_tables(text, name):
@@ -38,8 +39,8 @@ def drop_tables(text, name):
 
 def build_config(source_text, *, codex, port, token, default_model, web_search):
     """The isolated config.toml: the normal profile's settings, pointed at the bridge."""
-    first_table = re.search(r'^\[', source_text, re.M)
-    root, tables = (source_text[:first_table.start()], source_text[first_table.start():]) if first_table else (source_text, '')
+    end = root_end(source_text)
+    root, tables = source_text[:end], source_text[end:]
     overrides = {
         'model': default_model, 'model_provider': PROVIDER_ID, 'model_catalog_json': str(codex/'models.json'),
         'model_reasoning_summary': 'none', 'review_model': default_model,
@@ -47,6 +48,9 @@ def build_config(source_text, *, codex, port, token, default_model, web_search):
     }
     for key in [*overrides, *REMOVED_KEYS, 'model_reasoning_effort']:
         root = re.sub(r'^'+re.escape(key)+r'\s*=.*\n?', '', root, flags=re.M)
+    root = re.sub(r'^# Added by '+re.escape(PROJECT)+r'.*\n?', '', root, flags=re.M)
+    if root and not root.endswith('\n'):
+        root += '\n'
     for key, value in overrides.items():
         root += key+' = '+json.dumps(value)+'\n'
     # A provider with our id in the source profile is replaced, never merged.
@@ -110,6 +114,9 @@ def main(argv=None):
     config = config.replace(str(source/'.tmp/bundled-marketplaces/openai-bundled'), str(codex/'.tmp/bundled-marketplaces/openai-bundled'))
     (codex/'config.toml').write_text(config)
     (codex/'config.toml').chmod(0o600)
+    # Chats started on the app's provider resume on it, and without this URL it
+    # sends them to OpenAI. install.py and launch.py switch new chats over.
+    set_app_provider(codex, token_file.read_text().strip(), enabled=False, port=args.port)
 
     # Plugin code is copied; authentication, conversations, browser state and
     # Electron storage stay independent of the normal profile.

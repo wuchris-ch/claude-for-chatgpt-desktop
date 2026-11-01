@@ -4,10 +4,14 @@ import pathlib
 import shutil
 import sys
 import tempfile
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]/'scripts'))
-from sync_runtime import refresh_capabilities, enable_standalone_search, set_standalone_search, model_catalog
+from sync_runtime import provider_key, set_app_provider, refresh_capabilities, enable_standalone_search, set_standalone_search, model_catalog
 
 
 class PluginIsolationTests(unittest.TestCase):
@@ -173,6 +177,127 @@ class PluginIsolationTests(unittest.TestCase):
         (self.source/'models_cache.json').unlink()
         with self.assertRaisesRegex(RuntimeError,'Open the ChatGPT app once'):
             refresh_capabilities(self.source,self.codex)
+
+
+class AppProviderTests(unittest.TestCase):
+    """New chats reach the bridge through the app's own provider, so the app shows dictation."""
+    KEY = 'AZQLNBomdte7YldDsmgV25qTOMu3Jc_hJu_EihHrYRY'
+    URL = 'http://127.0.0.1:19480/k/'+KEY+'/v1'
+    CONFIG = ('model = "claude-opus"\nmodel_provider = "claude_bridge"\nmodel_reasoning_effort = "high"\n\n'
+              '[features]\nstandalone_web_search = true\n\n[model_providers.claude_bridge]\nname = "Claude"\n'
+              'base_url = "http://127.0.0.1:19480/v1"\n\n[model_providers.claude_bridge.http_headers]\nX-Claude-Bridge-Key = "fixture-secret"\n')
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='bridge-provider-test-')
+        self.addCleanup(self.temporary.cleanup)
+        self.codex = pathlib.Path(self.temporary.name)
+        self.config = self.codex/'config.toml'
+        self.config.write_text(self.CONFIG)
+        self.config.chmod(0o600)
+
+    def root(self):
+        text = self.config.read_text()
+        return text[:text.index('[features]')]
+
+    def test_key_matches_the_bridge(self):
+        # test/app-provider.test.mjs checks providerKey against the same value.
+        self.assertEqual(provider_key('fixture-secret'), self.KEY)
+
+    def test_switching_on_keeps_the_old_provider_for_earlier_chats_and_is_idempotent(self):
+        self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=True))
+        root = self.root()
+        self.assertNotIn('model_provider', root)
+        self.assertIn('openai_base_url = "'+self.URL+'"\n', root)
+        text = self.config.read_text()
+        for kept in ['model = "claude-opus"', 'model_reasoning_effort = "high"', '[model_providers.claude_bridge]',
+                     'X-Claude-Bridge-Key = "fixture-secret"', 'standalone_web_search = true']:
+            self.assertIn(kept, text)
+        self.assertEqual(text.count('openai_base_url'), 1)
+        self.assertFalse(set_app_provider(self.codex, 'fixture-secret', enabled=True))
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+
+    def test_the_port_comes_from_the_caller(self):
+        set_app_provider(self.codex, 'fixture-secret', enabled=True, port=19999)
+        self.assertIn('http://127.0.0.1:19999/k/', self.root())
+
+    def test_switching_off_keeps_the_url_so_saved_chats_stay_on_the_bridge(self):
+        set_app_provider(self.codex, 'fixture-secret', enabled=True)
+        self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=False))
+        root = self.root()
+        self.assertIn('openai_base_url = "'+self.URL+'"\n', root)
+        self.assertIn('model_provider = "claude_bridge"\n', root)
+        self.assertEqual(root.count('openai_base_url'), 1)
+        self.assertFalse(set_app_provider(self.codex, 'fixture-secret', enabled=False))
+        self.assertIn('[model_providers.claude_bridge.http_headers]', self.config.read_text())
+
+    def test_switching_off_before_ever_switching_on_adds_the_url(self):
+        self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=False))
+        self.assertIn('openai_base_url = "'+self.URL+'"\n', self.root())
+        self.assertIn('model_provider = "claude_bridge"\n', self.root())
+
+    def test_another_openai_base_url_is_left_alone(self):
+        self.config.write_text('openai_base_url = "https://proxy.example/v1"\n' + self.CONFIG)
+        before = self.config.read_text()
+        self.assertFalse(set_app_provider(self.codex, 'fixture-secret', enabled=True))
+        self.assertEqual(self.config.read_text(), before)
+        self.assertFalse(set_app_provider(self.codex, 'fixture-secret', enabled=False))
+        self.assertEqual(self.config.read_text(), before)
+
+    def test_a_picker_setting_copied_by_an_older_setup_is_replaced(self):
+        self.config.write_text('# Added by claude-for-chatgpt-desktop. Remove with: python3 scripts/picker.py uninstall\n'
+                               'openai_base_url = "http://127.0.0.1:19480/g/gateway-key/backend-api/codex"\n' + self.CONFIG)
+        self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=True))
+        root = self.root()
+        self.assertNotIn('gateway-key', root)
+        self.assertNotIn('# Added by', root)
+        self.assertEqual(root.count('openai_base_url'), 1)
+        self.assertIn(self.URL, root)
+
+    def test_a_new_token_replaces_the_old_key(self):
+        set_app_provider(self.codex, 'fixture-secret', enabled=True)
+        self.assertTrue(set_app_provider(self.codex, 'rotated-secret', enabled=True))
+        root = self.root()
+        self.assertEqual(root.count('openai_base_url'), 1)
+        self.assertIn(provider_key('rotated-secret'), root)
+
+    @unittest.skipIf(tomllib is None, 'needs Python 3.11')
+    def test_awkward_files_keep_both_settings_in_the_root_table(self):
+        for head in ['# use """ for long text\n', "# it's ok\n", 'notes = [\n  [1, 2],\n]\n', 'a = "# \\" [ not a comment"\n',
+                     "b = '''\n[x]\n'''\n", 'c = """\n[y]\n"""""\n']:
+            self.config.write_text(head + self.CONFIG)
+            self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=False))
+            data = tomllib.loads(self.config.read_text())
+            self.assertEqual((data['model_provider'], data['openai_base_url']), ('claude_bridge', self.URL), head)
+            self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=True))
+            data = tomllib.loads(self.config.read_text())
+            self.assertNotIn('model_provider', data, head)
+            self.assertEqual(data['openai_base_url'], self.URL, head)
+            self.assertIn('claude_bridge', data['model_providers'], head)
+
+    @unittest.skipIf(tomllib is None, 'needs Python 3.11')
+    def test_a_file_that_cannot_be_updated_safely_is_left_alone(self):
+        broken = 'x = """\nnever closed\n' + self.CONFIG
+        self.config.write_text(broken)
+        self.assertFalse(set_app_provider(self.codex, 'fixture-secret', enabled=True))
+        self.assertEqual(self.config.read_text(), broken)
+
+    def test_search_settings_stay_out_of_a_multi_line_string(self):
+        instructions = 'developer_instructions = """\n[not a table]\n"""\n'
+        self.config.write_text(instructions + 'web_search = "live"\n' + self.CONFIG)
+        set_standalone_search(self.codex, False)
+        text = self.config.read_text()
+        self.assertTrue(text.startswith(instructions))
+        self.assertIn('\nweb_search = "disabled"\n', text)
+
+    def test_a_multi_line_string_with_a_bracket_line_stays_intact(self):
+        instructions = 'developer_instructions = """\n[not a table]\nmodel_note = 1\n"""\n'
+        self.config.write_text(instructions + self.CONFIG)
+        self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=True))
+        text = self.config.read_text()
+        self.assertTrue(text.startswith(instructions))
+        self.assertLess(text.index('"""\nmodel = '), text.index('openai_base_url'))
+        self.assertLess(text.index('openai_base_url'), text.index('[features]'))
+        self.assertNotIn('model_provider', text[:text.index('[features]')])
 
 
 if __name__ == '__main__':

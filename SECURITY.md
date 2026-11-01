@@ -9,7 +9,7 @@ Include:
 - the version from `package.json`, your macOS version and your ChatGPT app version
 - steps to reproduce, and what happened compared with what you expected
 
-Leave out your bridge token, gateway key and any Claude or OpenAI credentials, and redact them from logs you attach. The gateway key appears in the `openai_base_url` line of `~/.codex/config.toml`.
+Leave out your bridge token, gateway key and any Claude or OpenAI credentials, and redact them from logs you attach. The gateway key appears in the `openai_base_url` line of `~/.codex/config.toml`, and the separate window's key in the same line of its own `config.toml`.
 
 ## Scope
 

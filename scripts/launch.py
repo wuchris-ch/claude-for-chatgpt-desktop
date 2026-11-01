@@ -8,7 +8,7 @@ import subprocess
 import time
 import urllib.request
 from bridge_config import DEFAULT_PORT, load_launch, load_models, runtime_dir, source_home
-from sync_runtime import refresh_capabilities
+from sync_runtime import refresh_capabilities, set_app_provider
 from runtime_paths import resolve_node
 
 argparse.ArgumentParser(description='Start the bridge if needed, then open the separate ChatGPT window that uses only Claude.').parse_args()
@@ -19,13 +19,15 @@ config=load_launch(runtime)
 token=(runtime/'token').read_text().strip()
 port=config.get('port',DEFAULT_PORT)
 resolve_node(config.get('node'))
-def healthy():
+def health():
     try:
         req=urllib.request.Request(f'http://127.0.0.1:{port}/health',headers={'Authorization':'Bearer '+token})
         with urllib.request.urlopen(req,timeout=1) as response:
-            return bool(json.load(response).get('models'))
+            return json.load(response)
     except Exception:
-        return False
+        return None
+def healthy():
+    return bool((health() or {}).get('models'))
 refresh_capabilities(source_home(),runtime/'codex',load_models(config.get('models_file')),config.get('web_search',False))
 if not healthy():
     label=config.get('launch_agent')
@@ -41,6 +43,9 @@ if not healthy():
         if healthy():break
         time.sleep(.1)
     else:raise SystemExit('The bridge did not become healthy. See '+str(runtime/'logs/bridge.stderr.log'))
+# Follows the running bridge, so a rolled-back bridge also gets its provider back.
+state=health()
+if state is not None:set_app_provider(runtime/'codex',token,enabled=bool(state.get('app_provider')),port=port)
 expected=config['app']+'/Contents/MacOS/ChatGPT --user-data-dir='+str(runtime/'user-data')
 running=any(line.strip()==expected for line in subprocess.check_output(['ps','-axo','command='],text=True).splitlines())
 if running:

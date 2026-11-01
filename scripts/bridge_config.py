@@ -53,6 +53,50 @@ def load_models(path=None):
     return {'default': default, 'models': models}
 
 
+def root_end(text):
+    """Offset of the line with the first table header in a TOML file.
+
+    Skips comments, strings of all four kinds and the lines of a multi-line
+    array, any of which can hold a line that starts with [ or an unpaired quote.
+    """
+    i, depth, line_start = 0, 0, True
+    while i < len(text):
+        c = text[i]
+        if c == '\n':
+            line_start = True
+        elif c == '#':
+            i = text.find('\n', i)
+            if i < 0:
+                return len(text)
+            continue
+        elif c not in ' \t\r':
+            if c == '[' and line_start and not depth:
+                return text.rfind('\n', 0, i)+1
+            line_start = False
+            if text.startswith(('"""', "'''"), i):
+                quote = text[i:i+3]
+                i += 3
+                while i < len(text) and not text.startswith(quote, i):
+                    i += 2 if quote == '"""' and text[i] == '\\' else 1
+                if i >= len(text):
+                    return len(text)
+                # A multi-line string can end with up to two more quotes.
+                i += 3
+                while i < len(text) and text[i] == quote[0]:
+                    i += 1
+                continue
+            if c in '"\'':
+                i += 1
+                while i < len(text) and text[i] not in (c, '\n'):
+                    i += 2 if c == '"' and text[i] == '\\' else 1
+            elif c == '[':
+                depth += 1
+            elif c == ']':
+                depth = max(0, depth-1)
+        i += 1
+    return len(text)
+
+
 def service_env(runtime, config):
     """Environment for the bridge process, derived from launch.json."""
     env = {

@@ -12,7 +12,7 @@ import subprocess
 import time
 import urllib.request
 from bridge_config import APP_NAME, DEFAULT_PORT, load_launch, load_models, runtime_dir, source_home
-from sync_runtime import refresh_capabilities
+from sync_runtime import refresh_capabilities, set_app_provider
 from runtime_paths import resolve_node
 from release import atomic_write, switch_release
 
@@ -114,6 +114,10 @@ def activate():
            'StandardOutPath':str(runtime/'logs/bridge.jsonl'),'StandardErrorPath':str(runtime/'logs/bridge.stderr.log')}
     atomic_write(agent,plistlib.dumps(plist))
     start_service(expected_version)
+    # New chats use the app's own provider only once a bridge that serves its
+    # route is running; an older one would answer with a login error.
+    state=health()
+    if state is not None:set_app_provider(runtime/'codex',token,enabled=bool(state.get('app_provider')),port=port)
 
 stop_service()
 # The service appends to one log while it runs. An install starts a new log

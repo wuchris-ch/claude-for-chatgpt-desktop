@@ -35,8 +35,10 @@ async function postSearch({authorization,accountId,body,upstream=SEARCH_URL,time
 
 // This module never reads credentials from disk. Only the isolated desktop's
 // request credentials are forwarded, and only to the fixed search endpoint.
+// keyed: the request came through the app's own provider, authenticated by the
+// key in its path, so it carries no bridge header.
 export function createSearchHandler({token,log,headerNames,upstream=SEARCH_URL,timeoutMs=60000}) {
-  return async(req,res)=>{
+  return async(req,res,{keyed=false}={})=>{
     let commands=[],status=502;
     const send=result=>{
       status=result.status;
@@ -47,7 +49,7 @@ export function createSearchHandler({token,log,headerNames,upstream=SEARCH_URL,t
     try {
       headerNames(Object.keys(req.headers).sort());
       const authorization=req.headers.authorization;
-      if(!req.headers['x-claude-bridge-key']||typeof authorization!=='string'||!/^Bearer \S+$/.test(authorization)||authorization===`Bearer ${token}`) {
+      if(!(keyed||req.headers['x-claude-bridge-key'])||typeof authorization!=='string'||!/^Bearer \S+$/.test(authorization)||authorization===`Bearer ${token}`) {
         return send(error(401,'Web search requires the isolated ChatGPT login. Sign into the Claude window, then retry.'));
       }
       let body;

@@ -1,8 +1,14 @@
 """The isolated profile's settings, optional instruction sharing and service environment."""
+import contextlib
+import io
 import os
 import pathlib
 import sys
 import tempfile
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]/'scripts'))
@@ -36,6 +42,26 @@ class SetupConfigTests(unittest.TestCase):
         values = dict(codex=pathlib.Path('/tmp/isolated codex'), port=19490, token='fixture-token', default_model='claude-opus', web_search=False)
         values.update(options)
         return build_config(SOURCE, **values)
+
+    @unittest.skipIf(tomllib is None, 'needs Python 3.11')
+    def test_root_settings_land_in_the_root_table_of_awkward_files(self):
+        for source in ['developer_instructions = """\n[not a table]\n"""\n\n[features]\nmemories = false\n',
+                       '# use """ for long text\n\n[features]\nmemories = false\n',
+                       'notes = [\n  [1, 2],\n]\n\n[features]\nmemories = false\n',
+                       'approval_policy = "never"']:
+            config = build_config(source, codex=pathlib.Path('/tmp/isolated codex'), port=19490, token='fixture-token', default_model='claude-opus', web_search=False)
+            data = tomllib.loads(config)
+            self.assertEqual(data['model'], 'claude-opus')
+            self.assertEqual(data['model_provider'], 'claude_bridge')
+            self.assertEqual(data['web_search'], 'disabled')
+            self.assertIn('claude_bridge', data['model_providers'])
+
+    def test_the_picker_setting_stays_out_of_the_profile(self):
+        source = ('model = "gpt-6"\n# Added by claude-for-chatgpt-desktop. Remove with: python3 scripts/picker.py uninstall\n'
+                  'openai_base_url = "http://127.0.0.1:19480/g/gateway-key/backend-api/codex"\n\n[features]\nmemories = false\n')
+        config = build_config(source, codex=pathlib.Path('/tmp/isolated codex'), port=19490, token='fixture-token', default_model='claude-opus', web_search=False)
+        for removed in ['openai_base_url', 'gateway-key', '# Added by']:
+            self.assertNotIn(removed, config)
 
     def test_profile_points_at_the_bridge_and_keeps_other_settings(self):
         config = self.config()
@@ -124,6 +150,29 @@ class ServiceEnvironmentTests(unittest.TestCase):
         os.environ.pop('CODEX_HOME')
         self.assertEqual(source_home(), pathlib.Path.home()/'.codex')
 
+
+
+class AppProviderSetupTests(unittest.TestCase):
+    def test_setup_keeps_the_bridge_url_for_chats_saved_on_the_app_provider(self):
+        import json
+        import setup
+        with tempfile.TemporaryDirectory(prefix='bridge-setup-url-') as root:
+            runtime, source = pathlib.Path(root)/'runtime', pathlib.Path(root)/'source'
+            runtime.mkdir();source.mkdir()
+            (source/'models_cache.json').write_text(json.dumps({'models':[{'slug':'gpt-x','tool_mode':'code_mode_only'}]}))
+            saved = {k: os.environ.get(k) for k in ['CLAUDE_BRIDGE_RUNTIME', 'CODEX_HOME']}
+            os.environ.update(CLAUDE_BRIDGE_RUNTIME=str(runtime), CODEX_HOME=str(source))
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    setup.main(['--port', '19501'])
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+            config = (runtime/'codex/config.toml').read_text()
+            root_table = config[:config.index('[')]
+            self.assertIn('model_provider = "claude_bridge"', root_table)
+            self.assertIn('openai_base_url = "http://127.0.0.1:19501/k/', root_table)
+            self.assertEqual((runtime/'codex/config.toml').stat().st_mode & 0o777, 0o600)
 
 
 class PickerGuardTests(unittest.TestCase):

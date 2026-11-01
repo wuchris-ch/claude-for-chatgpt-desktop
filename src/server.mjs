@@ -2,18 +2,36 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {timingSafeEqual} from 'node:crypto';
+import {timingSafeEqual, createHmac} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
 import {Session} from './session.mjs';
 import {createSearchHandler, pickerSearch} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
-import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions} from './protocol.mjs';
+import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, ResponseStream} from './protocol.mjs';
 import {loadModels, effortFor, labelFor} from './models.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
 const MAX_REQUEST_BYTES=256*1024*1024;
 export const DEFAULT_PORT=19480;
 export const AUTH_MODES=['claude_login','api_key'];
+// The app's own provider retries a reply that ends without a final event, so a
+// restart ends it with a failure the app shows instead.
+const RESTARTED_MID_REPLY='The Claude bridge restarted while replying. Send a message to continue.';
+
+// ChatGPT desktop 26.1016 shows dictation, read-aloud and image generation only
+// while config.toml selects its own `openai` provider, which cannot carry a
+// custom header. New chats in the separate window therefore reach the bridge
+// through openai_base_url with this key in the path; chats started on the
+// claude_bridge provider keep the header. scripts/sync_runtime.py derives the
+// same key.
+export const providerKey=token=>createHmac('sha256',token).update('claude-for-chatgpt-desktop app provider v1').digest('base64url');
+// /k/<key>/v1/... becomes /v1/...; null for a wrong key or another route.
+export function keyedPath(pathname,key) {
+  const match=/^\/k\/([^/]*)(\/v1\/.*)$/.exec(pathname);
+  if(!match)return null;
+  const actual=Buffer.from(match[1]),expected=Buffer.from(key);
+  return actual.length===expected.length&&timingSafeEqual(actual,expected)?match[2]:null;
+}
 
 // CLAUDE_BIN wins; otherwise the first executable `claude` on PATH, then the
 // usual install locations, which a LaunchAgent's short PATH can miss.
@@ -103,6 +121,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   // the local hop separately. Only standalone search forwards desktop auth,
   // directly to OpenAI; model inference and Claude never receive that token.
   const authenticated=req=>{const actual=Buffer.from(req.headers['x-claude-bridge-key']??req.headers.authorization??'');const expected=Buffer.from(req.headers['x-claude-bridge-key']?token:`Bearer ${token}`);return actual.length===expected.length&&timingSafeEqual(actual,expected);};
+  const appKey=providerKey(token);
   const json=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
   const headerFile=path.join(stateDir,'search-header-names.json');
   let capturedHeaders=fs.existsSync(headerFile);
@@ -138,10 +157,10 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     // GPT's web search is one of them. Where the app offers it, Claude gets
     // the bridge's own search tool, which uses the same ChatGPT sign-in.
     let searching=null;
-    if(req.gateway&&Array.isArray(body.tools)) {
+    if((req.gateway||req.appProvider)&&Array.isArray(body.tools)) {
       const hosted=body.tools.filter(t=>!['function','custom','namespace'].includes(t.type));
       if(hosted.length){body={...body,tools:body.tools.filter(t=>!hosted.includes(t))};log('hosted_tools_omitted',{types:hosted.map(t=>t.type)});}
-      searching=pickerSearch(hosted,req.headers,token);
+      if(req.gateway)searching=pickerSearch(hosted,req.headers,token);
     }
     validateRequestOptions(kind==='compaction'?{...body,tools:[]}:body);
     effortFor(model,body.reasoning?.effort);
@@ -162,8 +181,11 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     body.__bridge_model=model;
     // Kept in memory with the request only, never written to disk.
     if(searching&&kind!=='compaction')body.__bridge_search={...searching,thread,model:body.model};
+    // The app's provider retries a failure it reads as transient, which would
+    // run the turn again; the bridge marks its failures as final.
+    if(req.appProvider)body.__bridge_final_errors=true;
     const key=[thread,metadata.context_window_id??'default',kind,checkpointKey].join(':');
-    bridge.log('request',{model:model.slug,request_kind:kind,picker:req.gateway??false,window:metadata.window_number,tools:body.tools?.length,items:body.input.length});
+    bridge.log('request',{model:model.slug,request_kind:kind,picker:req.gateway??false,app_provider:!!req.appProvider,window:metadata.window_number,tools:body.tools?.length,items:body.input.length});
     if(!bridge.sessions.has(key))bridge.sessions.set(key,new Session(bridge,key));
     await bridge.sessions.get(key).accept(body,res,frames=>{
       try{const temp=cacheFile+'.tmp';fs.writeFileSync(temp,sealCheckpoint(frames,token),{mode:0o600});fs.renameSync(temp,cacheFile);}
@@ -172,9 +194,10 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   }
   const gateway=gatewayKey?createGateway({bridge,key:gatewayKey,upstream:gatewayUpstream,serve:serveClaude,log}):null;
   const server=http.createServer(async(req,res)=>{
+    let url=null;
     try {
       if(req.headers.origin)return json(res,403,{error:{message:'Browser-origin requests are not allowed.'}});
-      const url=new URL(req.url,bridge.url);
+      url=new URL(req.url,bridge.url);
       // Picker mode: the path carries the key, because the app's built-in
       // provider cannot add headers.
       if(url.pathname.startsWith('/g/')) {
@@ -185,13 +208,19 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         if(req.method==='POST'&&sub==='/responses'&&raw)try{decoded=JSON.parse(decode(raw,req.headers['content-encoding']).toString());}catch{}
         return await gateway.handleHttp(req,res,sub,url,raw,decoded);
       }
-      if(!authenticated(req))return json(res,401,{error:{message:'Bridge authentication required.'}});
-      if(url.pathname==='/health')return json(res,200,{status:'ok',version:VERSION,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway,sessions:bridge.sessions.size,
+      // The separate window's new chats. A wrong key is refused with 403: a 401
+      // would make the app's provider treat its ChatGPT login as expired.
+      if(url.pathname.startsWith('/k/')) {
+        const rest=keyedPath(url.pathname,appKey);
+        if(rest===null)return json(res,403,{error:{message:'Bridge authentication required.'}});
+        url.pathname=rest;req.appProvider=true;
+      } else if(!authenticated(req))return json(res,401,{error:{message:'Bridge authentication required.'}});
+      if(url.pathname==='/health')return json(res,200,{status:'ok',version:VERSION,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway,app_provider:true,sessions:bridge.sessions.size,
         active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length,active_relays:gateway?.active()??0});
       if(url.pathname==='/v1/models')return json(res,200,{object:'list',data:models.list.map(m=>({id:m.slug,object:'model',owned_by:'anthropic',display_name:bridge.label(m)}))});
       if(req.method==='POST'&&url.pathname==='/v1/alpha/search') {
         if(!bridge.webSearch)return json(res,404,{error:{message:'Web search is turned off for this bridge. Run setup again with --web-search to turn it on.'}});
-        return await search(req,res);
+        return await search(req,res,{keyed:!!req.appProvider});
       }
       let body;
       if(req.method==='POST') {
@@ -216,14 +245,28 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
       return await serveClaude(req,res,body);
     } catch(error) {
       bridge.log('request_error',{message:error.message});
-      if(!res.headersSent)json(res,error.statusCode??(error.code==='ERR_BUFFER_TOO_LARGE'?413:500),{error:{message:error.message}});
+      const status=error.statusCode??(error.code==='ERR_BUFFER_TOO_LARGE'?413:500);
+      // The app's provider retries a 5xx and a stream that ends without a
+      // result, so a failed turn there ends as a final response.failed.
+      if(req.appProvider&&url?.pathname==='/v1/responses'&&status>=500&&!res.writableEnded) {
+        const failed={type:'response.failed',response:{object:'response',status:'failed',output:[],error:{code:'invalid_prompt',message:error.message}}};
+        if(!res.headersSent){const stream=new ResponseStream(res);stream.final=true;stream.fail(error.message);}
+        else{res.write(`event: response.failed\ndata: ${JSON.stringify(failed)}\n\n`);res.end();}
+      }
+      else if(!res.headersSent)json(res,status,{error:{message:error.message}});
       else if(!res.writableEnded){res.write(`event: error\ndata: ${JSON.stringify({type:'error',message:error.message})}\n\n`);res.end();}
     }
   });
   // An error here, before any key is checked, would end the whole bridge.
   server.on('upgrade',(req,socket,head)=>{
+    // Node removes its own socket error listener before 'upgrade', so a client
+    // that resets the connection would otherwise crash the bridge.
+    socket.on('error',()=>{});
     try {
       const url=new URL(req.url,bridge.url);
+      // The app's own provider opens a WebSocket first. 426 makes it switch the
+      // chat to HTTP at once, without a retry or a notice.
+      if(url.pathname.startsWith('/k/')){log('websocket_refused',{});socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
       // The app can try a WebSocket on the window provider first. A missing
       // route makes it fall back to HTTP; a refusal would read as a login error.
       if(!url.pathname.startsWith('/g/')){socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
@@ -245,7 +288,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
   bridge.url=`http://127.0.0.1:${server.address().port}`;
   // A session stopped before Claude Code's init waits for it, so all are stopped before any is awaited.
-  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();const all=[...bridge.sessions.values()];for(const s of all)s.cancel('Bridge shutting down.');for(const s of all){await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
+  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();const all=[...bridge.sessions.values()];for(const s of all){if(s.stream?.final&&!s.stream.finished)s.stream.fail(RESTARTED_MID_REPLY);s.cancel('Bridge shutting down.');}for(const s of all){await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
   log('bridge_ready',{url:bridge.url,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway});return bridge;
 }
 

@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Refresh capabilities while preserving the isolated instance's preferences."""
+import base64
 import copy
+import hashlib
+import hmac
 import json
 import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from urllib.parse import quote
-from bridge_config import PROVIDER_ID, load_models, runtime_dir, load_launch
+from bridge_config import DEFAULT_PORT, PROJECT, PROVIDER_ID, load_models, root_end, runtime_dir, load_launch
 
 # The desktop compacts at this share of a model's context window, below
 # Claude's own limit, so its summary request still fits.
@@ -49,7 +53,7 @@ def set_standalone_search(codex, enabled=True):
                                 ('model_providers.'+PROVIDER_ID,'supports_standalone_web_search',flag)]:
         headers=list(re.finditer(r'^[ \t]*\[[^\n]+\][ \t]*$',value,re.M))
         if not section:
-            start=0;end=headers[0].start() if headers else len(value)
+            start=0;end=root_end(value)
         else:
             found=next((i for i,h in enumerate(headers) if h.group().strip()=='['+section+']'),None)
             if found is None:
@@ -67,6 +71,73 @@ def set_standalone_search(codex, enabled=True):
 
 def enable_standalone_search(codex):
     return set_standalone_search(codex, True)
+
+def provider_key(token):
+    """The path key for the app's own provider, as providerKey in src/server.mjs derives it."""
+    digest=hmac.new(token.encode(),(PROJECT+' app provider v1').encode(),hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
+
+def app_provider_url(token, port=DEFAULT_PORT):
+    return f'http://127.0.0.1:{int(port)}/k/{provider_key(token)}/v1'
+
+def provider_settings_hold(text, url, provider):
+    """Whether the new file parses with these root settings. Python before 3.11 has no parser."""
+    try:
+        import tomllib
+    except ImportError:
+        return True
+    try:
+        data=tomllib.loads(text)
+    except ValueError:
+        return False
+    return data.get('model_provider')==provider and (url is None or data.get('openai_base_url')==url)
+
+def set_app_provider(codex, token, enabled, port=DEFAULT_PORT):
+    """Select the app's own provider, pointed at the bridge, or the claude_bridge provider.
+
+    ChatGPT desktop 26.1016 hides dictation unless config.toml selects its own
+    `openai` provider. New threads then reach the bridge through
+    openai_base_url; threads started earlier keep claude_bridge, which stays
+    defined. Only call this with enabled=True while the running bridge reports
+    app_provider: an older bridge answers the path with 401, which the app
+    reads as an expired ChatGPT login. Switching off keeps openai_base_url:
+    threads saved on the app's provider resume on it, and without the URL it
+    sends them to OpenAI's servers.
+    """
+    config=pathlib.Path(codex)/'config.toml'
+    if not config.exists():return False
+    original=config.read_text()
+    end=root_end(original)
+    root,tables=original[:end],original[end:]
+    url=app_provider_url(token,port)
+    # /g/ is the picker's setting, which an older setup copied from ~/.codex.
+    # It would send this profile's requests through the GPT relay.
+    ours=r'^(?:# Added by '+re.escape(PROJECT)+r'.*\n)?[ \t]*openai_base_url[ \t]*=[ \t]*"http://127\.0\.0\.1:'+str(int(port))+r'/[kg]/[^"\n]*"[ \t]*\n?'
+    current=re.search(r'^[ \t]*openai_base_url[ \t]*=[ \t]*'+re.escape(json.dumps(url))+r'[ \t]*$',root,re.M)
+    provider=re.search(r'^[ \t]*model_provider[ \t]*=[ \t]*(.*?)[ \t]*$',root,re.M)
+    foreign=re.search(r'^[ \t]*openai_base_url[ \t]*=',root,re.M) and not re.search(ours,root,re.M)
+    if enabled and current and not provider:return False
+    if not enabled and (current or foreign) and provider and provider.group(1)=='"'+PROVIDER_ID+'"':return False
+    if enabled and foreign:
+        print('The Claude window keeps the '+PROVIDER_ID+' provider: its config.toml sets another openai_base_url.',file=sys.stderr)
+        return False
+    if not foreign:
+        root=re.sub(ours,'',root,flags=re.M)
+        root=root.rstrip('\n')+'\nopenai_base_url = '+json.dumps(url)+'\n'
+    root=re.sub(r'^[ \t]*model_provider[ \t]*=.*\n?','',root,flags=re.M)
+    if not enabled:root=root.rstrip('\n')+'\nmodel_provider = "'+PROVIDER_ID+'"\n'
+    if tables:root=root.rstrip('\n')+'\n\n'
+    root=root.lstrip('\n')
+    if root+tables==original:return False
+    # Without either setting in the root table the app's provider would send
+    # chats to OpenAI, so a file this code can't place them in stays as it is.
+    if not provider_settings_hold(root+tables,None if foreign else url,None if enabled else PROVIDER_ID):
+        print('The Claude window keeps its provider: its config.toml could not be updated safely.',file=sys.stderr)
+        return False
+    temporary=config.with_name('config.toml.provider-tmp')
+    temporary.unlink(missing_ok=True);temporary.touch(mode=0o600)
+    temporary.write_text(root+tables);shutil.copymode(config,temporary);temporary.replace(config)
+    return True
 
 def model_catalog(template, models, started=None):
     """Desktop catalog entries for the Claude models, built from a GPT entry."""
