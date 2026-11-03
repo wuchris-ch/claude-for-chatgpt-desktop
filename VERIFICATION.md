@@ -2,7 +2,15 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, and 0.3.14 updates dependencies. The newest checks come first.
+
+## Release 0.3.14, checked November 3, 2026
+
+### Dependencies
+
+The MCP SDK moves from 1.32.1 to 1.32.2 and `ws` from 8.22.0 to 8.22.1. With `npm audit fix`, this clears the 7 advisories `npm audit` reported, 2 of them high: zod 4.6.7, body-parser 2.4.0, qs 6.17.1, fast-uri 3.1.9, hono 4.13.16, @hono/node-server 2.1.6 and ip-address 10.7.6, all through the SDK.
+
+195 Node tests and 55 Python tests pass. With Claude Code on Haiku 5.5, `node e2e/app-runtime.mjs` passed 26 of 26 on desktop 26.1027.30824, and `node e2e/live.mjs` passed 18 of 18 with no bridge errors, across the four models, tool calls, mid-turn messages, an image, compaction, Stops and resumes.
 
 ## Release 0.3.13, checked November 1, 2026
 
