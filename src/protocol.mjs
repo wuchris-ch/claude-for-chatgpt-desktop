@@ -216,6 +216,22 @@ export function otherModelTurns(input, stamp) {
   const since = input.slice(historyEnd(input, stamp));
   return since.some(x => !isIncoming(x) && !isDeveloper(x) && !isHostCall(x) && !isBridgeSearch(x) && !['reasoning', 'compaction_trigger'].includes(x.type)) ? since : null;
 }
+// After a stopped Claude turn the desktop keeps Claude's partial answer and
+// calls, which carry the bridge's ids. Anything else the model side added is
+// another model's: before the stop is resumed, its turns and the messages that
+// asked for them are split off, so they reach Claude as the other model's.
+export function otherModelAfterStop(input, stamp) {
+  const since = input.slice(historyEnd(input, stamp));
+  // A call can come before the stamp and its output after it. Claude Code's
+  // own call ids start with toolu_.
+  const claudeCalls = new Set(input.filter(x => x.call_id && (isBridgeId(x.id) || /^toolu_/.test(x.call_id))).map(x => x.call_id));
+  const first = since.findIndex(x => !isIncoming(x) && !isDeveloper(x) && !isHostCall(x) && !isBridgeId(x.id)
+    && !['reasoning', 'compaction_trigger'].includes(x.type) && !(isResult(x) && claudeCalls.has(x.call_id)));
+  if (first < 0) return null;
+  let start = first;
+  while (start > 0 && isIncoming(since[start-1])) start--;
+  return {before: since.slice(0, start), after: since.slice(start)};
+}
 export const OTHER_MODEL_NOTE = '<other_model_turns>Another model continued this conversation after your last turn. Its messages and tool activity follow as history, then the new message.</other_model_turns>';
 // What the desktop added after a stopped turn that its native session never
 // received: user and agent messages, developer notes (the desktop notes the
@@ -253,7 +269,7 @@ const STOP_MARKS='The user did not reject, stop or interrupt anything. Claude Co
 // The desktop notes a Stop as <turn_aborted>. A restart can cut off a turn the
 // user had already stopped, and then the user did stop it.
 export const userStopped = items => items.some(x => isDeveloper(x) && contentBlocks(x.content).some(c => c.text?.includes('<turn_aborted')));
-const hostStopped = (items, reason) => reason === 'compacted_mid_turn' || [RESTART, CLAUDE_EXITED].includes(reason) && !userStopped(items);
+const hostStopped = (items, reason) => ['compacted_mid_turn', RESTART, CLAUDE_EXITED].includes(reason) && !userStopped(items);
 // Claude Code answers the call it was waiting on with an error such as "MCP
 // server is not connected" when it is terminated, or as rejected when it is
 // interrupted.
@@ -279,7 +295,7 @@ export function stoppedTurnNote(items, {reason, sent = 0, status}) {
 // and waited for a go: 44 of 48 such resumes from October 9 to 11, 2026 carried
 // only the message.
 export const resampledSteer = (items, reason) => reason === 'Desktop cancelled or disconnected.' && items.some(isIncoming) && !items.some(isCallResult) && !userStopped(items);
-export function resumeAfterStop(items, {reason, sent = 0, status}) {
+export function resumeAfterStop(items, {reason, sent = 0, status}, {more = false} = {}) {
   if (resampledSteer(items, reason)) {
     const parts = ['The desktop restarted your response to deliver the message below, which the user sent while you were working. The user did not stop you: Claude Code marked the response as interrupted by the user because of this restart.'];
     if (sent) parts.push('A tool call shown as rejected had already reached the host, which may have run it in part or in full. Check its effects before relying on it or running it again.');
@@ -288,10 +304,12 @@ export function resumeAfterStop(items, {reason, sent = 0, status}) {
   }
   const parts = [reason === API_FAILED ? 'Your previous attempt at this turn '+failedNote({status})
     : !hostStopped(items, reason) ? 'Your previous turn was stopped before it finished.'
-    : reason === CLAUDE_EXITED ? 'Your previous turn was cut off. '+EXIT_MARKS : 'Your previous turn was cut off by a bridge restart. '+STOP_MARKS];
+    : reason === CLAUDE_EXITED ? 'Your previous turn was cut off. '+EXIT_MARKS
+    : reason === 'compacted_mid_turn' ? 'Your previous turn was paused for a compaction that did not finish. '+STOP_MARKS
+    : 'Your previous turn was cut off by a bridge restart. '+STOP_MARKS];
   if (items.some(isCallResult)) parts.push('A tool call shown as rejected or interrupted may still have run in the host. The output the host recorded follows.');
   else if (sent) parts.push('A tool call shown as rejected had already reached the host, which may have run it in part or in full. Check its effects before relying on it or running it again.');
-  if (!items.some(isIncoming)) parts.push('Continue the task from where it stopped.');
+  if (!items.some(isIncoming) && !more) parts.push('Continue the task from where it stopped.');
   return [{type: 'text', text: `<turn_stopped>${parts.join(' ')}</turn_stopped>`},
     ...items.flatMap(x => userInput([x], {replay: isCallResult(x), prefix: false}))];
 }

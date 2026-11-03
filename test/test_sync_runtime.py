@@ -281,6 +281,15 @@ class AppProviderTests(unittest.TestCase):
         self.assertFalse(set_app_provider(self.codex, 'fixture-secret', enabled=True))
         self.assertEqual(self.config.read_text(), broken)
 
+    @unittest.skipIf(tomllib is None, 'needs Python 3.11')
+    def test_search_settings_use_a_features_table_defined_by_a_dotted_key(self):
+        for root in ['features.memories = false\n', 'features . goals = true\n']:
+            self.config.write_text(root + 'web_search = "live"\n' + self.CONFIG.replace('[features]\nstandalone_web_search = true\n\n', ''))
+            set_standalone_search(self.codex, False)
+            data = tomllib.loads(self.config.read_text())
+            self.assertEqual(data['features']['standalone_web_search'], False, root)
+            self.assertEqual(data['web_search'], 'disabled')
+
     def test_search_settings_stay_out_of_a_multi_line_string(self):
         instructions = 'developer_instructions = """\n[not a table]\n"""\n'
         self.config.write_text(instructions + 'web_search = "live"\n' + self.CONFIG)

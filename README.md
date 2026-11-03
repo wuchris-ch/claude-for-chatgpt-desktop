@@ -102,11 +102,11 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 250 automated tests, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 269 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
-- **macOS only.** Tested with ChatGPT 26.1007.71326 (Codex runtime 0.162.0-alpha.17.2), Claude Code 2.1.300 and Node.js 24.21. A later app or Claude Code release can need an update here.
+- **macOS only.** Tested with ChatGPT 26.1027.61615 (Codex runtime 0.166.0-alpha.5.1), Claude Code 2.1.317 and Node.js 24.21. A later app or Claude Code release can need an update here.
 - **Local tasks only.** Cloud tasks, image generation and other OpenAI-hosted features stay with GPT. Voice conversations run on OpenAI's voice model, which hands tasks to the selected Claude model. Other tools that run on OpenAI's servers are left out of Claude's tools.
 - **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. The setting is in the shared `~/.codex/config.toml`, so the Codex CLI and IDE extension also go through the bridge. The uninstall command works even when the service or its folder is gone. Picker mode needs a ChatGPT sign-in, doesn't use proxy settings, and isn't meant for ChatGPT workspaces with data-residency routing.
 - **GPT's summaries are encrypted for GPT.** If a chat that GPT compacted switches to Claude, Claude gets the messages after the summary and a note that it's unavailable.
@@ -197,6 +197,7 @@ Run the commands below from the downloaded folder (`~/Library/Application Suppor
 - `python3 scripts/picker.py install` adds a marked `openai_base_url` line to `config.toml` in your ChatGPT profile (`~/.codex`, or `$CODEX_HOME`), pointing at the bridge with a private key in the path.
   - It first saves `config.toml` and the app's cached model list to `backups/` in the runtime folder.
   - It refuses to run if you already set `openai_base_url` yourself or the profile uses another model provider.
+  - It changes nothing while a Claude or GPT response is streaming, since it restarts the bridge. Run it again when the reply ends.
 - `python3 scripts/picker.py uninstall` restores `config.toml` byte for byte when nothing else in it changed. Otherwise it removes only the marked line and keeps your later edits. It also restores the cached model list. If the runtime folder is gone, it still removes the marked line.
 - A `config.toml` that is a symlink, such as one kept in a dotfiles repository, stays a link; the file it points to is changed.
 - `python3 scripts/picker.py status` shows whether picker mode is on.
@@ -339,7 +340,7 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 ## Development
 
 ```sh
-npm test               # 250 tests with stand-ins for Claude Code and OpenAI
+npm test               # 269 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # eighteen short checks with real Claude Code
 node e2e/app-runtime.mjs   # the app's own runtime against this bridge, with a placeholder login
 ```

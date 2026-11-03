@@ -162,6 +162,14 @@ input.on('line',async line=>{
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   busy=true;await client.callTool({name:'clock_sleep',arguments:args}).catch(()=>{});busy=false;text('SLEPT');return;
  }
+ if(request.includes('think-then-tool')){
+  const next={input:'text("next");'};start();
+  event({type:'content_block_start',index:0,content_block:{type:'thinking',thinking:''}});
+  event({type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:'PRIVATE THOUGHT before the tool.'}});
+  assistant([{type:'thinking',thinking:'PRIVATE THOUGHT before the tool.'},{type:'tool_use',id:'toolu_think',name:'mcp__chatgpt__exec',input:next}]);
+  event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
+  busy=true;await client.callTool({name:'exec',arguments:next});busy=false;text('DONE');return;
+ }
  if(request.includes('slow-response')){start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'waiting'}});return;}
  if(request.includes('invoke-tool')||request.includes('racing-tool')||request.includes('timeout-tool')||request.includes('stop-after-tool')||request.includes('tool-then-api-error')||request.includes('abort-on-sigint')){
   const args={input:'text("hello");\ntext(42);'};start();

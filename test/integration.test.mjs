@@ -915,3 +915,49 @@ test('bridge shutdown stops every session before waiting on any, so each one sti
  assert.equal(logs.filter(x=>x.event==='stopped_at_init'&&x.reason==='Bridge shutting down.').length,2);
  for(const s of b.sessions.values())assert.equal(s.record.stop?.reason,'Bridge shutting down.');
 });
+
+test('a thought before the first tool call of a later turn stays private',async t=>{
+ const {post,b,logs}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ // A mid-turn message whose turn ended before Claude's next step leaves this set.
+ [...b.sessions.values()][0].ack={thinking:''};
+ const out=output(await(await post({...first,input:[...first.input,...a,...request('think-then-tool','user2').input]})).text());
+ assert.equal(out[0].type,'custom_tool_call');
+ assert.doesNotMatch(JSON.stringify(out),/PRIVATE THOUGHT/);
+ assert.equal(logs.some(x=>x.event==='steering_ack_from_thinking'),false);
+});
+test('a Stop and a resend while the stopped request is still being set up both settle',async t=>{
+ const {post,b,logs}=await setup(t);const first=request('stop-after-tool');
+ const call=output(await(await post(first)).text())[0];
+ const history=[...first.input,call,{type:'custom_tool_call_output',call_id:call.call_id,output:'323'}];
+ const abort=new AbortController();const res=await post({...first,input:history},{signal:abort.signal});
+ const reader=res.body.getReader();let chunks='';
+ while(!chunks.includes('waiting after tool')){const {value}=await reader.read();chunks+=new TextDecoder().decode(value);}
+ abort.abort();
+ const session=[...b.sessions.values()][0];
+ await waitUntil(()=>session.stopping);
+ // The next request waits for that process to exit, and is stopped meanwhile.
+ const next={...first,input:[...history,...request('continue now','user2').input]};
+ const stop=new AbortController();const waiting=post(next,{signal:stop.signal}).catch(()=>null);
+ await waitUntil(()=>session.accepting);
+ stop.abort();await waiting;
+ const again=await post(next);
+ assert.equal(again.status,200);
+ assert.ok(output(await again.text()));
+ assert.equal(logs.some(x=>x.event==='request_error'&&/already accepting/.test(x.message)),false);
+});
+
+test('GPT turns after a stopped Claude turn reach Claude as the other model\'s, from the cache',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('slow-response');
+ await stopWhileStreaming(post,first,logs);
+ const note={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The user interrupted the previous turn.</turn_aborted>'}]};
+ const gpt=[{type:'message',id:'msg_gpt1',role:'assistant',content:[{type:'output_text',text:'GPT checked the logs.'}]},
+  {type:'function_call',id:'fc_gpt1',call_id:'call_gpt',name:'exec_command',arguments:'{"cmd":"ls"}'},
+  {type:'function_call_output',call_id:'call_gpt',output:'gpt tool output'}];
+ const input=[...first.input,note,...request('ask gpt','user2').input,...gpt,...request('back to claude','user3').input];
+ const report=resumed(output(await(await post({...first,input})).text()));
+ assert.match(report.request,/turn_stopped.*stopped before it finished.*turn_aborted.*other_model_turns.*ask gpt.*GPT checked the logs.*gpt tool output.*back to claude/);
+ assert.doesNotMatch(report.request,/may still have run|Continue the task/);
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.other_model_items===5));
+});

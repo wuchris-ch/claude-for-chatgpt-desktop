@@ -45,10 +45,19 @@ def health():
         with urllib.request.urlopen(req,timeout=1) as r:return json.load(r)
     except Exception:return None
 
-def children():
+def bridge_pid():
+    """The pid in bridge.pid while that process is this runtime's bridge, else None.
+
+    The file stays after the bridge exits, and macOS reuses pids."""
     pidfile=runtime/'bridge.pid'
-    if not pidfile.exists():return False
-    return subprocess.run(['pgrep','-P',pidfile.read_text().strip()],capture_output=True).returncode==0
+    try:pid=int(pidfile.read_text().strip())
+    except (OSError,ValueError):return None
+    command=subprocess.run(['ps','-p',str(pid),'-o','command='],capture_output=True,text=True).stdout
+    return pid if 'src/server.mjs' in command and str(runtime) in command else None
+
+def children():
+    pid=bridge_pid()
+    return pid is not None and subprocess.run(['pgrep','-P',str(pid)],capture_output=True).returncode==0
 
 def busy():
     state=health() or {}
@@ -78,13 +87,10 @@ previous_version=(health() or {}).get('version')
 
 def stop_service():
     subprocess.run(['launchctl','bootout',domain+'/'+label],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    pidfile=runtime/'bridge.pid'
-    if pidfile.exists():
-        pid=int(pidfile.read_text())
-        command=subprocess.run(['ps','-p',str(pid),'-o','command='],capture_output=True,text=True).stdout
-        if 'src/server.mjs' in command and str(runtime) in command:
-            try:os.kill(pid,signal.SIGTERM)
-            except ProcessLookupError:pass
+    pid=bridge_pid()
+    if pid is not None:
+        try:os.kill(pid,signal.SIGTERM)
+        except ProcessLookupError:pass
     for _ in range(100):
         if not health():return
         time.sleep(.1)
@@ -123,6 +129,8 @@ stop_service()
 # The service appends to one log while it runs. An install starts a new log
 # once it passes 20 MB, keeping the previous one.
 log_file=runtime/'logs/bridge.jsonl'
-if log_file.exists() and log_file.stat().st_size>20*1024*1024:log_file.replace(runtime/'logs/bridge.jsonl.1')
+try:
+    if log_file.exists() and log_file.stat().st_size>20*1024*1024:log_file.replace(runtime/'logs/bridge.jsonl.1')
+except OSError:pass
 switch_release(app,stage,runtime/'launch.json',agent,activate,stop_service,lambda:start_service(previous_version))
 print(f'Installed {APP_NAME} {expected_version} as {label} on port {port}. macOS restarts it if it exits.')

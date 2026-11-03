@@ -66,48 +66,67 @@ if [ "$MODE" = uninstall ]; then
     removed=""
     config="${CODEX_HOME:-$HOME/.codex}/config.toml"
     if grep -qs '^# Added by claude-for-chatgpt-desktop' "$config"; then
-      python3 - "$config" <<'PY'
+      python3 - "$config" "$(dirname "$config")/models_cache.json" <<'PY'
 import os, re, sys
 path = os.path.realpath(sys.argv[1])
-lines = open(path).read().split('\n')
-kept, skip = [], False
-for line in lines:
-    if line.startswith('# Added by claude-for-chatgpt-desktop'):
-        skip = True
-        continue
-    if skip and re.match(r'[ \t]*openai_base_url[ \t]*=', line):
-        skip = False
-        continue
-    skip = False
+with open(path, newline='') as f:
+    lines = f.read().split('\n')
+# The marker, and the picker's setting wherever it is in the root table.
+ours = lambda line: re.match(r'[ \t]*openai_base_url[ \t]*=', line) and '127.0.0.1' in line and '/g/' in line
+quotes = lambda line, inside: re.findall(r'"""|\'\'\'', line.split('#')[0] if inside is None else line)
+kept, inside, root, dropped = [], None, True, None
+for i, line in enumerate(lines):
+    if inside is None and line.lstrip().startswith('['):
+        root = False
+    if root and inside is None:
+        if line.startswith('# Added by claude-for-chatgpt-desktop'):
+            continue
+        if ours(line):
+            dropped = i
+            continue
+        # The blank line the picker put between its setting and a table.
+        if dropped == i-1 and line == '' and i+1 < len(lines) and lines[i+1].lstrip().startswith('['):
+            continue
+    for quote in quotes(line, inside):
+        inside = quote if inside is None else None if quote == inside else inside
     kept.append(line)
 # A Claude model the app saved as the default would make new chats fail.
 inside = None
 for i, line in enumerate(kept):
     if inside is None and line.lstrip().startswith('['):
         break
-    if inside is None and re.match(r'[ \t]*model[ \t]*=[ \t]*"claude-(fable|opus|sonnet|haiku)"', line):
+    if inside is None and re.match(r'[ \t]*model[ \t]*=[ \t]*"claude-(fable|opus|sonnet|haiku)(-[0-9]+)*"', line):
         del kept[i]
         break
-    for quote in re.findall(r'"""|\'\'\'', line):
+    for quote in quotes(line, inside):
         inside = quote if inside is None else None if quote == inside else inside
 temporary = path + '.picker-tmp'
 if os.path.exists(temporary):
     os.unlink(temporary)
-with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as f:
+with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w', newline='') as f:
     f.write('\n'.join(kept))
 os.chmod(temporary, os.stat(path).st_mode & 0o777)
 os.replace(temporary, path)
+# The app's saved model list still has the Claude entries; it downloads a new one.
+cache = sys.argv[2]
+if os.path.exists(cache) and '"claude-' in open(cache, errors='replace').read():
+    os.unlink(cache)
 PY
       say "Removed the picker setting from $config. Restart ChatGPT."
       removed=1
     fi
     label=io.github.wuchris-ch.claude-for-chatgpt-desktop
     plist="$HOME/Library/LaunchAgents/$label.plist"
-    if [ -f "$plist" ]; then
+    # The service names the runtime folder it runs from. One installed with a
+    # different CLAUDE_BRIDGE_RUNTIME is another copy, and keeps running.
+    owner=$(plutil -extract EnvironmentVariables.CLAUDE_BRIDGE_RUNTIME raw -o - "$plist" 2>/dev/null || true)
+    if [ -f "$plist" ] && [ "${owner%/}" = "${RUNTIME%/}" ]; then
       launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
       rm -f "$plist"
       say "Removed the background service."
       removed=1
+    elif [ -f "$plist" ]; then
+      say "Left the background service in place: it runs the copy in ${owner:-another folder}."
     fi
     [ -n "$removed" ] || fail "Nothing to uninstall: no copy of Claude for ChatGPT Desktop was found in $RUNTIME."
     exit 0
@@ -171,6 +190,11 @@ say "Installing the background service"
 python3 scripts/install.py
 
 if [ "$MODE" = window ]; then
+  # Switching from the picker: GPT goes straight to OpenAI again.
+  if [ -f "$RUNTIME/picker.json" ]; then
+    say "Taking Claude out of the ChatGPT model picker"
+    python3 scripts/picker.py uninstall
+  fi
   say "Opening the Claude window"
   python3 scripts/launch.py
   echo "Sign into ChatGPT once in the new window. To open it later, double-click \"Open ChatGPT with Claude.command\" in $SRC."
@@ -187,10 +211,15 @@ python3 scripts/picker.py install \
   || fail "Picker mode could not be turned on (see above). For a separate Claude window instead, run this again with --window."
 
 # Only one ChatGPT window can be restarted safely; with more, the user does it.
-running=$(pgrep -x ChatGPT | wc -l | tr -d ' ' || true)
-if [ "$running" = 0 ]; then
+# The separate Claude window runs the same app with its own --user-data-dir.
+instances() { ps -axo command= | grep -E "^$APP/Contents/MacOS/ChatGPT( |\$)" || true; }
+main=$(instances | grep -vc -- '--user-data-dir' || true)
+others=$(instances | grep -c -- '--user-data-dir' || true)
+if [ "$main" = 0 ] && [ "$others" = 0 ]; then
   open "$APP"
-elif [ "$running" = 1 ] && ask "ChatGPT needs to reopen to show Claude. Reopen it now?"; then
+elif [ "$main" = 0 ]; then
+  echo "Open ChatGPT to see Claude in the model picker."
+elif [ "$main" = 1 ] && [ "$others" = 0 ] && ask "ChatGPT needs to reopen to show Claude. Reopen it now?"; then
   osascript -e 'tell application id "com.openai.codex" to quit' >/dev/null
   for _ in $(seq 1 100); do pgrep -xq ChatGPT || break; sleep 0.2; done
   open "$APP"

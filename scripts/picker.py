@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from bridge_config import DEFAULT_PORT, PROJECT, load_launch, load_models, root_end, runtime_dir, source_home
+from bridge_config import DEFAULT_PORT, PROJECT, load_launch, load_models, root_end, runtime_dir, source_home, statements, string_value
 
 MARK = '# Added by '+PROJECT+'. Remove with: python3 scripts/picker.py uninstall'
 KEY_LINE = re.compile(r'^[ \t]*openai_base_url[ \t]*=.*$', re.M)
@@ -42,11 +42,13 @@ def sha(data):
 def add_setting(text, url):
     """Insert the marked openai_base_url line at the end of the root table."""
     end = root_end(text)
-    if KEY_LINE.search(text[:end]):
+    lines = statements(text[:end])
+    if any(s[0] == 'key' and s[1] == 'openai_base_url' for s in lines):
         raise SystemExit('Your config.toml already sets openai_base_url. Picker mode would replace it, so nothing was changed.')
-    provider = PROVIDER_LINE.search(text[:end])
-    if provider and provider.group(1) != 'openai':
-        raise SystemExit('This profile uses the model provider '+provider.group(1)+'. Picker mode works on a profile that uses '
+    provider = next((s for s in lines if s[0] == 'key' and s[1] == 'model_provider'), None)
+    name = provider and (string_value(text, provider) or text[provider[2]:provider[3]].split('=', 1)[1].strip())
+    if provider and name != 'openai':
+        raise SystemExit('This profile uses the model provider '+name+'. Picker mode works on a profile that uses '
                          'ChatGPT\'s own OpenAI connection, usually ~/.codex. Nothing was changed.')
     root = text[:end]
     if root and not root.endswith('\n'):
@@ -117,25 +119,43 @@ def install(codex, runtime, service=True):
     config_file, cache_file, state_file = codex/'config.toml', codex/'models_cache.json', runtime/'picker.json'
     print('ChatGPT profile:', codex)
     if state_file.exists():
-        print('Picker mode is already on. Run uninstall first to reinstall.')
-        return
+        if config_file.exists() and still_set(config_file.read_bytes().decode()):
+            print('Picker mode is already on. Run uninstall first to reinstall.')
+            return
+        # The setting went, for example with a dotfiles sync, while the state stayed.
+        print('The picker setting is missing from', config_file, 'so it is added again.')
+        state_file.unlink()
     launch = load_launch(runtime)
     port = launch.get('port', DEFAULT_PORT)
+    # Restarting the bridge would cut off a reply in progress.
+    health = bridge_health(runtime, port) if service else None
+    if health and (health.get('active_sessions') or health.get('active_relays')):
+        raise SystemExit('A Claude or GPT response is streaming. Run this again once it finishes. Nothing was changed.')
     key_file = runtime/'gateway-key'
     if not key_file.exists():
         with os.fdopen(os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as handle:
             handle.write(secrets.token_urlsafe(32))
     key = key_file.read_text().strip()
-    original = config_file.read_bytes() if config_file.exists() else b''
+    url = gateway_url(port, key)
+
+    def prepare(original, quiet=False):
+        # A setting left by an earlier copy whose runtime folder is gone points
+        # at a key that no longer exists. Replace it, and keep it out of the backup.
+        if still_set(original.decode()):
+            cleaned = remove_setting(original.decode())
+            cleaned = '\n'.join(line for line in cleaned.split('\n') if not (KEY_LINE.match(line) and '/g/' in line and '127.0.0.1' in line))
+            original = cleaned.encode()
+            if not quiet:
+                print('Replacing the picker setting left by an earlier installation.')
+        updated = add_setting(original.decode(), url)
+        if not settings_hold(original.decode(), updated, url):
+            raise SystemExit('Picker mode could not add its setting to '+str(config_file)+' safely. Nothing was changed.')
+        return original, updated.encode()
+
+    existed = config_file.exists()
+    read = config_file.read_bytes() if existed else b''
     mode = os.stat(os.path.realpath(config_file)).st_mode & 0o777 if config_file.exists() else None
-    # A setting left by an earlier copy whose runtime folder is gone points at
-    # a key that no longer exists. Replace it, and keep it out of the backup.
-    if still_set(original.decode()):
-        cleaned = remove_setting(original.decode())
-        cleaned = '\n'.join(line for line in cleaned.split('\n') if not (KEY_LINE.match(line) and '/g/' in line and '127.0.0.1' in line))
-        original = cleaned.encode()
-        print('Replacing the picker setting left by an earlier installation.')
-    updated = add_setting(original.decode(), gateway_url(port, key)).encode()
+    original, updated = prepare(read)
     # The bridge must serve picker mode before the app is pointed at it.
     if service:
         restart_service(launch)
@@ -145,6 +165,10 @@ def install(codex, runtime, service=True):
             time.sleep(.1)
         else:
             raise SystemExit('The bridge did not start in picker mode. Nothing in your ChatGPT profile was changed.')
+        # The app can save a setting while the bridge restarts.
+        fresh = config_file.read_bytes() if config_file.exists() else b''
+        if fresh != read:
+            original, updated = prepare(fresh, quiet=True)
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     backup, n = runtime/'backups'/stamp, 1
     while backup.exists():
@@ -157,7 +181,7 @@ def install(codex, runtime, service=True):
         shutil.copy2(cache_file, backup/'models_cache.json')
         (backup/'models_cache.json').chmod(0o600)
     write_atomic(config_file, updated, 0o600, private=True)
-    state = {'codex_home': str(codex), 'backup': str(backup), 'config_existed': bool(original) or config_file.exists(),
+    state = {'codex_home': str(codex), 'backup': str(backup), 'config_existed': existed,
              'config_sha_before': sha(original), 'config_sha_after': sha(updated), 'config_mode': mode, 'port': port,
              'installed_at': datetime.datetime.now().isoformat(timespec='seconds')}
     write_atomic(state_file, json.dumps(state, indent=2).encode(), 0o600)
@@ -166,8 +190,25 @@ def install(codex, runtime, service=True):
     print('Restart the ChatGPT app, then choose a Claude model in the picker.')
 
 
+def settings_hold(before, after, url):
+    """Whether after parses with the setting and everything else from before.
+
+    Python before 3.11 has no TOML parser, and then this always holds."""
+    try:
+        import tomllib
+    except ImportError:
+        return True
+    try:
+        old, new = tomllib.loads(before), tomllib.loads(after)
+    except ValueError:
+        return False
+    return new.pop('openai_base_url', None) == url and new == old
+
+
 def still_set(text):
-    return any('/g/' in line and '127.0.0.1' in line for line in KEY_LINE.findall(text))
+    root = text[:root_end(text)]
+    return any(s[0] == 'key' and s[1] == 'openai_base_url' and '/g/' in (string_value(root, s) or '') and '127.0.0.1' in (string_value(root, s) or '')
+               for s in statements(root))
 
 
 MODEL_LINE = re.compile(r'[ \t]*model[ \t]*=[ \t]*"([^"]*)"')
@@ -175,18 +216,9 @@ EFFORT_LINE = re.compile(r'[ \t]*model_reasoning_effort[ \t]*=')
 
 
 def root_lines(text):
-    """(offset, line) for each line of the root table outside multi-line strings."""
-    offset, inside, out = 0, None, []
-    for line in text[:root_end(text)].splitlines(keepends=True):
-        if inside is None:
-            out.append((offset, line))
-        for quote in re.findall(r'"""|\'\'\'', line):
-            if inside is None:
-                inside = quote
-            elif quote == inside:
-                inside = None
-        offset += len(line)
-    return out
+    """(offset, statement) for each key = value statement of the root table."""
+    root = text[:root_end(text)]
+    return [(start, root[start:end]) for kind, _, start, end in statements(root) if kind == 'key']
 
 
 def claude_slugs(runtime=None):
@@ -223,7 +255,7 @@ def reset_claude_default(text, backup=None, slugs=None):
     old_model = find(backup, MODEL_LINE) if backup is not None else None
     if old_model and MODEL_LINE.match(old_model[1]).group(1) in slugs:
         old_model = None
-    old_effort = find(backup, EFFORT_LINE) if backup is not None and old_model else None
+    old_effort = find(backup, EFFORT_LINE) if backup is not None else None
     line = lambda match: match[1] if match[1].endswith('\n') else match[1]+'\n'
     edits = [(found, line(old_model) if old_model else '')]
     effort = find(text, EFFORT_LINE)
@@ -251,7 +283,7 @@ def uninstall(codex, runtime):
         # The runtime folder was deleted or replaced while the setting stayed,
         # which leaves GPT pointing at a bridge that is gone.
         config_file = codex/'config.toml'
-        text = config_file.read_text() if config_file.exists() else ''
+        text = config_file.read_bytes().decode() if config_file.exists() else ''
         if not (MARK in text or still_set(text)):
             print('Picker mode is not on. Nothing to undo.')
             return
@@ -274,7 +306,10 @@ def uninstall(codex, runtime):
         original = (backup/'config.toml').read_bytes()
         # A backup taken after an older uninstall can hold a Claude default.
         restored, model = reset_claude_default(original.decode(), None, slugs)
-        write_atomic(config_file, restored.encode())
+        if not restored and not state.get('config_existed', True):
+            config_file.unlink(missing_ok=True)
+        else:
+            write_atomic(config_file, restored.encode())
         how = 'restored byte for byte from the backup' if model is None else 'restored from the backup without its Claude default model'
     else:
         backup_file = backup/'config.toml'
@@ -299,9 +334,9 @@ def uninstall(codex, runtime):
 def status(codex, runtime):
     state_file = runtime/'picker.json'
     config_file = codex/'config.toml'
-    text = config_file.read_text() if config_file.exists() else ''
-    present = MARK in text
-    print('Picker mode:', 'on' if state_file.exists() else 'off')
+    text = config_file.read_bytes().decode() if config_file.exists() else ''
+    present = still_set(text)
+    print('Picker mode:', 'on' if state_file.exists() and present else 'off')
     print('Setting in', config_file, ':', 'present' if present else 'absent')
     if (runtime/'launch.json').exists():
         health = bridge_health(runtime, load_launch(runtime).get('port', DEFAULT_PORT)) or {}

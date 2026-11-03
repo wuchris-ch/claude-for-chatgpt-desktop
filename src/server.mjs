@@ -202,10 +202,13 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
       // provider cannot add headers.
       if(url.pathname.startsWith('/g/')) {
         const sub=gateway?gatewayPath(url.pathname,gatewayKey):null;
-        if(sub===null)return json(res,401,{error:{message:'Bridge authentication required.'}});
+        // 403, not 401: a 401 starts the app's ChatGPT login recovery, and an
+        // app or CLI still running with a key from before a reinstall gets this.
+        if(sub===null)return json(res,403,{error:{message:'Bridge authentication required.'}});
         const raw=['GET','HEAD'].includes(req.method)?null:await readBody(req);
         let decoded=null;
-        if(req.method==='POST'&&sub==='/responses'&&raw)try{decoded=JSON.parse(decode(raw,req.headers['content-encoding']).toString());}catch{}
+        // Compaction requests carry Claude's checkpoints too, which OpenAI can't read.
+        if(req.method==='POST'&&(sub==='/responses'||sub==='/responses/compact')&&raw)try{decoded=JSON.parse(decode(raw,req.headers['content-encoding']).toString());}catch{}
         return await gateway.handleHttp(req,res,sub,url,raw,decoded);
       }
       // The separate window's new chats. A wrong key is refused with 403: a 401
@@ -271,7 +274,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
       // route makes it fall back to HTTP; a refusal would read as a login error.
       if(!url.pathname.startsWith('/g/')){socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
       const sub=gateway&&!req.headers.origin?gatewayPath(url.pathname,gatewayKey):null;
-      if(sub===null){socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
+      if(sub===null){socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');return;}
       gateway.handleUpgrade(req,socket,head,sub,url);
     } catch(error) {
       log('upgrade_error',{message:error.message});

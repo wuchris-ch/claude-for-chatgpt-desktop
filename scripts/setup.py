@@ -14,7 +14,7 @@ import secrets
 import shutil
 import subprocess
 from bridge_config import (APP_NAME, DEFAULT_APP, DEFAULT_LABEL, DEFAULT_PORT, PROJECT, PROVIDER_ID,
-                           load_models, root_end, runtime_dir, source_home)
+                           drop_statements, load_models, root_end, runtime_dir, source_home, statements)
 from sync_runtime import refresh_capabilities, set_app_provider
 
 # Root settings this profile owns. Per-model context windows and compaction
@@ -25,15 +25,14 @@ REMOVED_KEYS = ['model_context_window', 'model_auto_compact_token_limit', 'opena
 
 def drop_tables(text, name):
     """Remove the TOML table name and its subtables, keeping everything else."""
-    headers = list(re.finditer(r'^[ \t]*\[\[?([^\]\n]+)\]\]?[ \t]*$', text, re.M))
+    headers = [s for s in statements(text) if s[0] in ('table', 'array')]
     if not headers:
         return text
-    kept = text[:headers[0].start()]
-    for i, header in enumerate(headers):
-        end = headers[i+1].start() if i+1 < len(headers) else len(text)
-        table = header.group(1).strip()
+    kept = text[:headers[0][2]]
+    for i, (_, table, start, _) in enumerate(headers):
+        end = headers[i+1][2] if i+1 < len(headers) else len(text)
         if table != name and not table.startswith(name+'.'):
-            kept += text[header.start():end]
+            kept += text[start:end]
     return kept
 
 
@@ -46,9 +45,9 @@ def build_config(source_text, *, codex, port, token, default_model, web_search):
         'model_reasoning_summary': 'none', 'review_model': default_model,
         'web_search': 'live' if web_search else 'disabled',
     }
-    for key in [*overrides, *REMOVED_KEYS, 'model_reasoning_effort']:
-        root = re.sub(r'^'+re.escape(key)+r'\s*=.*\n?', '', root, flags=re.M)
-    root = re.sub(r'^# Added by '+re.escape(PROJECT)+r'.*\n?', '', root, flags=re.M)
+    removed = {*overrides, *REMOVED_KEYS, 'model_reasoning_effort'}
+    root = drop_statements(root, lambda kind, name: kind == 'key' and name in removed
+                           or kind == 'comment' and name.startswith('# Added by '+PROJECT))
     if root and not root.endswith('\n'):
         root += '\n'
     for key, value in overrides.items():

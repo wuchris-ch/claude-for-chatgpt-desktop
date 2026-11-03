@@ -198,6 +198,9 @@ class ClaudeChannel {
   interrupt(){this.res?.abort();}
 }
 
+// How long a Claude request waits for OpenAI to end the GPT reply it interrupted.
+const GPT_END_WAIT_MS=3000;
+
 export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()=>{}}) {
   // Entries are named after the model each alias last started, and the tag
   // changes with the names, so the app downloads the list again.
@@ -285,6 +288,12 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     const claude=new ClaudeChannel({client,req,serve,log});
     // last is the kind of model the app last asked for on this connection.
     let upClosed=null,pending=0,last=null;const opened=Date.now();
+    // A Claude request that interrupts a GPT reply starts once OpenAI has ended
+    // that reply, as it would without the bridge. Later OpenAI events for it
+    // are dropped, since the app would read them as part of Claude's response.
+    let waiting=null;
+    const startClaude=message=>claude.create(message).catch(error=>{log('gateway_ws_error',{message:error.message});claude.res=null;claude.error(500,'The bridge could not answer this request: '+error.message);});
+    const release=()=>{if(!waiting)return;clearTimeout(waiting.timer);const {message}=waiting;waiting=null;startClaude(message);};
     const settle=count=>{active-=count;pending-=count;};
     const closeClient=()=>{const {code,reason}=upClosed??{code:1000,reason:''};try{client.close(code>=1000&&code<5000&&![1004,1005,1006].includes(code)?code:1000,reason);}catch{client.terminate();}};
     // An error here would end the whole bridge, and with it every chat.
@@ -293,7 +302,11 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
       if(!isBinary)try{message=JSON.parse(data.toString());}catch{}
       if(message?.type==='response.create'&&bridge.models.get(message.model)) {
         last='claude';
-        claude.create(message).catch(error=>{log('gateway_ws_error',{message:error.message});claude.res=null;claude.error(500,'The bridge could not answer this request: '+error.message);});
+        if(pending&&up.readyState===WebSocket.OPEN&&!waiting) {
+          waiting={message,timer:setTimeout(()=>{log('gateway_ws_gpt_end_timeout',{});release();},GPT_END_WAIT_MS)};
+          return;
+        }
+        startClaude(message);
         return;
       }
       if(message?.type==='response.interrupt'&&claude.owns(message.response_id)){claude.interrupt();return;}
@@ -318,26 +331,28 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
       const head=isBinary?'':data.toString().slice(0,200);
       // With no GPT request waiting, nothing OpenAI sends belongs to a Claude
       // connection, and the app would read it as part of Claude's next response.
-      if(!pending&&last==='claude'){log('gateway_ws_openai_message_dropped',{type:/"type"\s*:\s*"([^"]{1,80})"/.exec(head)?.[1]??null});return;}
-      if(pending&&/"type"\s*:\s*"(response\.(completed|failed|incomplete)|error)"/.test(head))settle(1);
+      const ended=pending&&/"type"\s*:\s*"(response\.(completed|failed|incomplete)|error)"/.test(head);
+      if(last==='claude'&&!waiting){if(ended)settle(1);log('gateway_ws_openai_message_dropped',{type:/"type"\s*:\s*"([^"]{1,80})"/.exec(head)?.[1]??null});return;}
+      if(ended)settle(1);
       if(!isBinary&&data.includes('x-models-etag'))try{
         const event=JSON.parse(data.toString());const headers=event.headers;
         if(headers&&typeof headers==='object')for(const name of Object.keys(headers))if(name.toLowerCase()==='x-models-etag')headers[name]=tagEtag(headers[name],tagNow());
         data=Buffer.from(JSON.stringify(event));
       }catch{}
       if(client.readyState===WebSocket.OPEN)client.send(data,{binary:isBinary});
+      if(waiting&&!pending)release();
     });
     // OpenAI closes idle connections, and Claude's turns leave this one idle.
     // Claude answers without OpenAI, so the app's side stays open when Claude
     // was last asked; otherwise it follows OpenAI's, as without the bridge.
     up.on('close',(code,reason)=>{
-      upClosed={code,reason};const gptPending=pending;settle(pending);
+      upClosed={code,reason};const gptPending=pending;settle(pending);release();
       if(client.readyState!==WebSocket.OPEN)return;
       const kept=last==='claude';
       log('gateway_ws_openai_closed',{code,reason:String(reason??'').slice(0,200),open_s:Math.round((Date.now()-opened)/1000),gpt_pending:gptPending,kept_open:kept});
       if(!kept)closeClient();
     });
-    client.on('close',()=>{settle(pending);claude.interrupt();if(up.readyState===WebSocket.OPEN||up.readyState===WebSocket.CONNECTING)up.close();});
+    client.on('close',()=>{if(waiting){clearTimeout(waiting.timer);waiting=null;}settle(pending);claude.interrupt();if(up.readyState===WebSocket.OPEN||up.readyState===WebSocket.CONNECTING)up.close();});
     up.on('error',()=>{});client.on('error',()=>{});
   }
 

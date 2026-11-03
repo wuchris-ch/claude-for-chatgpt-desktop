@@ -2,7 +2,51 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, and 0.3.14 updates dependencies. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, and 0.3.15 brings fixes from a verification pass of the whole project. The newest checks come first.
+
+## Release 0.3.15, checked November 3, 2026
+
+This release comes from a verification pass over the whole project. Three independent reviews covered the installer and config editors, the GPT relay, and the session and protocol code. Property tests ran every `config.toml` editor on generated files. A mutation check undid each fix in turn to confirm a test fails without it. A sandbox ran a full install, a switch each way, an update and both kinds of uninstall.
+
+### Config edits
+
+The editors now share one reader of TOML statements, in `scripts/bridge_config.py`. It lists each statement in the root table with its span, so a line inside a multi-line string or array is never read as a setting or a table. Keys are compared the way TOML compares them, quoted or dotted, with spaces around the dot or without. `setup.py`, `set_app_provider`, `set_standalone_search` and the picker all use it. `set_standalone_search` writes `features.<name>` in the root table when the file already sets its features that way, instead of adding a second `[features]` table.
+
+`test/test_config_properties.py` generates files with comments, all four string kinds, multi-line strings and arrays holding lines that look like settings or tables, CRLF and dotted keys, and runs each editor on them. `tomllib` reads every result. It must parse, hold the intended root settings, leave every other setting as it was, and come out the same from a second run. A second pass runs the editors without their own parse check, as macOS's Python 3.9 does. On 0.3.14 the harness found 8 kinds of failure, among them settings inside multi-line strings edited as if they were settings, and `features.goals = true` in the root table getting a second `[features]` table, which makes the file unreadable. The fixed code passed more than 13,000 generated files with no failure.
+
+### Picker mode
+
+- `--window` takes Claude out of the picker before it opens the window, so GPT goes straight to OpenAI again. Before, the picker setting stayed.
+- If the setting went while the state file stayed, for example with a dotfiles sync, install adds it again instead of reporting that picker mode is on, and `status` reports it off.
+- Install changes nothing while a Claude or GPT response is streaming, since it restarts the bridge.
+- If the app saves `config.toml` while the bridge restarts, install builds its change from the new file.
+- Before writing, install parses the new file and refuses unless it holds the setting and everything else unchanged.
+- Uninstall restores `model_reasoning_effort` from the backup when the app had saved a Claude default with its own effort. It deletes a `config.toml` that did not exist before, and keeps CRLF line endings.
+- A wrong key on the `/g/` route gets 403 over HTTP and WebSocket. A 401 starts the app's ChatGPT login recovery, which an app or CLI still holding a key from before a reinstall would have hit.
+- A Claude request that interrupts a GPT reply on the same WebSocket starts once OpenAI has ended that reply, or after 3 seconds. Before, OpenAI's last events for the GPT reply reached the app in the middle of Claude's response.
+- Compaction requests to OpenAI get Claude's checkpoints as text, as other requests already did. Before, a chat that Claude had compacted sent OpenAI a checkpoint it cannot read when GPT compacted it.
+
+### Installer and service
+
+- When the runtime folder is gone, `install.sh --uninstall` removes the background service only if the service runs from that folder. A copy installed with another `CLAUDE_BRIDGE_RUNTIME` keeps running. The sandbox run found this when its uninstall step stopped the copy already installed on the test Mac. The same path now also keeps CRLF line endings, removes a blank line only when the picker added it, resets a saved Claude default model, and deletes a cached model list that names Claude.
+- `install.py` checks that the process in `bridge.pid` is this runtime's bridge before stopping it or counting its children. macOS reuses process numbers, and a stale file could block an update.
+- If an update fails before it switches folders, the previous installation starts again. Before, the service stayed stopped.
+- The installer tells the main ChatGPT app apart from the separate Claude window, which runs the same app with its own `--user-data-dir`. With only the Claude window open, it offered to reopen ChatGPT and would have quit that window. Now it asks you to open ChatGPT, and it never quits the app while the window runs.
+
+### Sessions
+
+- GPT turns that follow a stopped Claude turn reach Claude marked as the other model's, after the note about the stop. Before, they were mixed into the resume of Claude's own stopped turn.
+- A Stop and a quick resend no longer fail with "already accepting a request" while the stopped request waits for the previous process to exit. The resend waits for it.
+- A thought before the first tool call of a later turn stays private. A flag left from an earlier Claude Code process could treat it as the reply to a mid-turn message.
+- A Stop during a mid-turn compaction is now the user's Stop. A pause for a compaction that did not finish reads as the host's, with its own wording.
+
+### Results
+
+`test/test_install_sh.py` runs `install.sh` in a scratch home with `launchctl` replaced, so the tests never touch a real service. The mutation check undid 15 of the fixes one at a time, and a test failed for 14 of them. The one left is the picker's parse check before writing, which only matters if the statement reader is wrong.
+
+201 Node tests and 68 Python tests pass, 62 of the Python tests under the system Python 3.9. With Claude Code 2.1.317, `node e2e/live.mjs` passed 18 of 18 with no bridge errors, across the four models, tool calls, mid-turn messages, an image, compaction, Stops and resumes. `node e2e/app-runtime.mjs` passed 26 of 26 on desktop 26.1027.61615 (Codex 0.166.0-alpha.5.1).
+
+The sandbox had its own runtime folder, `CODEX_HOME`, port and service label, with stand-ins for `open` and `osascript`. It ran a fresh install, an update over a stale `bridge.pid`, `--window` from the picker, which brought back the original `config.toml` without the saved Claude default, `--picker` again, an uninstall that restored the original bytes, and the uninstall with the runtime folder gone, which restored the original and deleted the cached model list.
 
 ## Release 0.3.14, checked November 3, 2026
 

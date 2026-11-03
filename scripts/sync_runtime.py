@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from urllib.parse import quote
-from bridge_config import DEFAULT_PORT, PROJECT, PROVIDER_ID, load_models, root_end, runtime_dir, load_launch
+from bridge_config import DEFAULT_PORT, PROJECT, PROVIDER_ID, load_models, root_end, runtime_dir, load_launch, statements, string_value
 
 # The desktop compacts at this share of a model's context window, below
 # Claude's own limit, so its summary request still fits.
@@ -51,19 +51,23 @@ def set_standalone_search(codex, enabled=True):
     for section,key,setting in [('', 'web_search', '"live"' if enabled else '"disabled"'),
                                 ('features','standalone_web_search',flag),
                                 ('model_providers.'+PROVIDER_ID,'supports_standalone_web_search',flag)]:
-        headers=list(re.finditer(r'^[ \t]*\[[^\n]+\][ \t]*$',value,re.M))
-        if not section:
-            start=0;end=root_end(value)
+        lines=statements(value)
+        headers=[s for s in lines if s[0] in ('table','array')]
+        root=headers[0][2] if headers else len(value)
+        found=next((i for i,h in enumerate(headers) if h[0]=='table' and h[1]==section),None) if section else None
+        # A root setting like features.memories = false defines the table too,
+        # and a second [features] would make the file invalid.
+        dotted=section and found is None and any(s[0]=='key' and s[1].startswith(section+'.') and s[2]<root for s in lines)
+        if not section or dotted:
+            start=0;end=root
+            if dotted:key=section+'.'+key
+        elif found is None:
+            value=value.rstrip()+'\n\n['+section+']\n'+key+' = '+setting+'\n';continue
         else:
-            found=next((i for i,h in enumerate(headers) if h.group().strip()=='['+section+']'),None)
-            if found is None:
-                value=value.rstrip()+'\n\n['+section+']\n'+key+' = '+setting+'\n';continue
-            start=headers[found].end();end=headers[found+1].start() if found+1<len(headers) else len(value)
-        block=value[start:end]
-        pattern=r'^[ \t]*'+re.escape(key)+r'[ \t]*=.*$'
-        if re.search(pattern,block,re.M):block=re.sub(pattern,key+' = '+setting,block,flags=re.M)
-        else:block=block.rstrip()+'\n'+key+' = '+setting+'\n\n'
-        value=value[:start]+block+value[end:]
+            start=headers[found][3];end=headers[found+1][2] if found+1<len(headers) else len(value)
+        line=next((s for s in lines if s[0]=='key' and s[1]==key and start<=s[2]<end),None)
+        if line:value=value[:line[2]]+key+' = '+setting+('\n' if value[line[3]-1:line[3]]=='\n' else '')+value[line[3]:]
+        else:value=value[:start]+value[start:end].rstrip()+'\n'+key+' = '+setting+'\n\n'+value[end:]
     if value==original:return False
     temporary=config.with_name('config.toml.search-tmp')
     temporary.write_text(value);shutil.copymode(config,temporary);temporary.replace(config)
@@ -110,21 +114,27 @@ def set_app_provider(codex, token, enabled, port=DEFAULT_PORT):
     end=root_end(original)
     root,tables=original[:end],original[end:]
     url=app_provider_url(token,port)
+    # Lines inside a multi-line string or array are never settings.
+    lines=statements(root)
+    urls=[s for s in lines if s[0]=='key' and s[1]=='openai_base_url']
+    providers=[s for s in lines if s[0]=='key' and s[1]=='model_provider']
     # /g/ is the picker's setting, which an older setup copied from ~/.codex.
     # It would send this profile's requests through the GPT relay.
-    ours=r'^(?:# Added by '+re.escape(PROJECT)+r'.*\n)?[ \t]*openai_base_url[ \t]*=[ \t]*"http://127\.0\.0\.1:'+str(int(port))+r'/[kg]/[^"\n]*"[ \t]*\n?'
-    current=re.search(r'^[ \t]*openai_base_url[ \t]*=[ \t]*'+re.escape(json.dumps(url))+r'[ \t]*$',root,re.M)
-    provider=re.search(r'^[ \t]*model_provider[ \t]*=[ \t]*(.*?)[ \t]*$',root,re.M)
-    foreign=re.search(r'^[ \t]*openai_base_url[ \t]*=',root,re.M) and not re.search(ours,root,re.M)
-    if enabled and current and not provider:return False
-    if not enabled and (current or foreign) and provider and provider.group(1)=='"'+PROVIDER_ID+'"':return False
+    ours=[s for s in urls if re.fullmatch(r'http://127\.0\.0\.1:'+str(int(port))+r'/[kg]/[^"]*',string_value(root,s) or '')]
+    marks=[lines[i-1] for i,s in enumerate(lines) if s in ours and i and lines[i-1][0]=='comment' and lines[i-1][1].startswith('# Added by '+PROJECT)]
+    current=any(string_value(root,s)==url for s in urls)
+    provider=string_value(root,providers[0]) if providers else None
+    foreign=any(s not in ours for s in urls)
+    if enabled and current and not providers:return False
+    if not enabled and (current or foreign) and provider==PROVIDER_ID:return False
     if enabled and foreign:
         print('The Claude window keeps the '+PROVIDER_ID+' provider: its config.toml sets another openai_base_url.',file=sys.stderr)
         return False
-    if not foreign:
-        root=re.sub(ours,'',root,flags=re.M)
-        root=root.rstrip('\n')+'\nopenai_base_url = '+json.dumps(url)+'\n'
-    root=re.sub(r'^[ \t]*model_provider[ \t]*=.*\n?','',root,flags=re.M)
+    drop=providers+([] if foreign else ours+marks)
+    kept,pos=[],0
+    for s in sorted(drop,key=lambda s:s[2]):kept.append(root[pos:s[2]]);pos=s[3]
+    root=''.join(kept)+root[pos:]
+    if not foreign:root=root.rstrip('\n')+'\nopenai_base_url = '+json.dumps(url)+'\n'
     if not enabled:root=root.rstrip('\n')+'\nmodel_provider = "'+PROVIDER_ID+'"\n'
     if tables:root=root.rstrip('\n')+'\n\n'
     root=root.lstrip('\n')

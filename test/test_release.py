@@ -1,4 +1,5 @@
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,25 @@ class ReleaseTests(unittest.TestCase):
                     switch_release(app,stage,config,agent,activate,lambda:events.append('stop'),restart)
                 self.assertEqual(events,['stop','restart'])
                 self.assertEqual((stage/'version').read_text(),'new')
+
+    def test_a_failure_before_the_switch_restarts_the_stopped_service(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=pathlib.Path(temp);app=root/'app';stage=root/'app-staging';previous=root/'app-previous'
+            for d in [app,stage,previous]:d.mkdir()
+            (app/'version').write_text('old');(stage/'version').write_text('new')
+            events=[]
+            original=shutil.rmtree
+            def failing(path,*a,**k):
+                if pathlib.Path(path)==previous:raise PermissionError('locked')
+                return original(path,*a,**k)
+            shutil.rmtree=failing
+            try:
+                with self.assertRaisesRegex(RuntimeError,'previous installation is running again'):
+                    switch_release(app,stage,root/'config',root/'agent',lambda:events.append('activate'),lambda:events.append('stop'),lambda:events.append('restart'))
+            finally:
+                shutil.rmtree=original
+            self.assertEqual(events,['restart'])
+            self.assertEqual((app/'version').read_text(),'old')
 
     def test_success_keeps_previous_code_for_recovery(self):
         with tempfile.TemporaryDirectory() as temp:

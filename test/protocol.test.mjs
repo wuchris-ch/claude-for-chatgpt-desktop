@@ -332,3 +332,12 @@ test('images in another model\'s turns are named as copies of what is shown',()=
  assert.match(note.text,/The images come from earlier in the conversation\..*not an additional attachment/);
  assert.match(replayImageNote(other)[0].text,/^<developer_message>The conversation above was imported from the desktop transcript\. /);
 });
+
+test('a Stop during a mid-turn compaction is the user\'s, and a pause alone is the host\'s',()=>{
+ const aborted={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The user interrupted the previous turn.</turn_aborted>'}]};
+ const said=items=>resumeAfterStop(items,{reason:'compacted_mid_turn'})[0].text;
+ assert.match(said([aborted]),/stopped before it finished/);
+ assert.doesNotMatch(said([aborted]),/did not reject, stop or interrupt|bridge restart/);
+ assert.match(said([]),/paused for a compaction that did not finish.*did not reject, stop or interrupt/);
+ assert.doesNotMatch(said([]),/bridge restart/);
+});

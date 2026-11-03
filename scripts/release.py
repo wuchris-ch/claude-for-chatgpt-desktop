@@ -14,11 +14,22 @@ def atomic_write(file, data):
 def switch_release(app, stage, config_file, agent_file, activate, stop, restart):
     snapshots = {p: p.read_bytes() if p.exists() else None for p in [config_file, agent_file]}
     previous = app.with_name('app-previous')
-    if previous.exists():
-        shutil.rmtree(previous)
     had_previous = app.exists()
-    if had_previous:
-        app.rename(previous)
+    # The service is already stopped, so a failure here restarts it unchanged.
+    try:
+        if previous.exists():
+            shutil.rmtree(previous)
+        if had_previous:
+            app.rename(previous)
+    except Exception as error:
+        if had_previous and not app.exists() and previous.exists():
+            previous.rename(app)
+        try:
+            if had_previous:
+                restart()
+        except Exception as rollback_error:
+            raise RuntimeError(f'Installation failed: {error}. Recovery also failed: {rollback_error}') from error
+        raise RuntimeError(f'Installation failed: {error}. The previous installation is running again.') from error
     try:
         stage.rename(app)
         activate()

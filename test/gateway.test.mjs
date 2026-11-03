@@ -128,11 +128,12 @@ test('a new Claude version renames its entry and makes the app download the list
  assert.equal(openai.seen.http.length,2);
 });
 
-test('a wrong key is refused before anything reaches OpenAI',async t=>{
+test('a wrong key is refused with 403 before anything reaches OpenAI',async t=>{
  const {openai,bridge,app}=await setup(t);
- assert.equal((await fetch(bridge.url+'/g/wrong-key/backend-api/codex/responses',{method:'POST',headers:app,body:'{}'})).status,401);
+ // Never 401, which would start the app's ChatGPT login recovery.
+ assert.equal((await fetch(bridge.url+'/g/wrong-key/backend-api/codex/responses',{method:'POST',headers:app,body:'{}'})).status,403);
  assert.equal((await fetch(bridge.url+'/g/'+KEY+'/backend-api/codex/responses',{method:'POST',headers:{...app,Origin:'https://example.com'},body:'{}'})).status,403);
- await assert.rejects(connect(bridge.url.replace('http','ws')+'/g/wrong-key/backend-api/codex/responses',app),e=>e.status===401);
+ await assert.rejects(connect(bridge.url.replace('http','ws')+'/g/wrong-key/backend-api/codex/responses',app),e=>e.status===403);
  assert.equal(openai.seen.http.length+openai.seen.handshakes.length,0);
 });
 
@@ -412,4 +413,42 @@ test('an expired ChatGPT login reaches the app as OpenAI sent it',async t=>{
  const response=await post({model:'gpt-fixture',stream:true,input:[]},{Authorization:'Bearer expired'});
  assert.equal(response.status,401);assert.equal((await response.json()).error.message,'expired');
  await assert.rejects(connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',{...app,Authorization:'Bearer expired'}),e=>e.status===401);
+});
+
+test('a Claude request that interrupts a GPT reply starts after OpenAI ends that reply',async t=>{
+ // OpenAI answers an interrupt a little later, with a last delta and the end of the reply.
+ const sockets=[];const server=http.createServer((req,res)=>{res.writeHead(404);res.end();});
+ const wss=new WebSocketServer({noServer:true});
+ server.on('upgrade',(req,socket,head)=>wss.handleUpgrade(req,socket,head,ws=>{sockets.push(ws);ws.on('message',data=>{
+  const message=JSON.parse(data.toString());
+  if(message.type==='response.create'){ws.send(JSON.stringify({type:'response.created',response:{id:'resp_gpt'}}));ws.send(JSON.stringify({type:'response.output_text.delta',delta:'gpt '}));}
+  if(message.type==='response.interrupt')setTimeout(()=>{ws.send(JSON.stringify({type:'response.output_text.delta',delta:'late'}));ws.send(JSON.stringify({type:'response.incomplete',response:{id:'resp_gpt'}}));ws.send(JSON.stringify({type:'response.output_text.delta',delta:'stray'}));},150);
+ });}));
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ t.after(async()=>{for(const c of wss.clients)c.terminate();server.closeAllConnections();await new Promise(r=>server.close(r));});
+ const {bridge,app,logs}=await setup(t,{upstream:`http://127.0.0.1:${server.address().port}/backend-api/codex`});
+ const c=await connect(bridge.url.replace('http','ws')+'/g/'+KEY+'/backend-api/codex/responses',app);
+ c.ws.send(JSON.stringify({type:'response.create',model:'gpt-fixture',input:[user('hi','g1')],tools,stream:true}));
+ await c.next('response.created');
+ c.ws.send(JSON.stringify({type:'response.interrupt',response_id:'resp_gpt'}));
+ c.ws.send(JSON.stringify({type:'response.create',model:'claude-opus',stream:true,tools,instructions:'fixture',client_metadata:{thread_id:'thread-switch'},input:[user('echo-input switched','u1')]}));
+ await c.next('response.completed');
+ const types=c.received.map(x=>x.type==='response.output_text.delta'?'delta:'+x.delta:x.type);
+ const end=types.indexOf('response.incomplete'),claude=types.indexOf('response.created',1);
+ assert.ok(end>=0&&end<claude,types.join(' '));
+ assert.ok(types.includes('delta:late'));assert.ok(!types.includes('delta:stray'),types.join(' '));
+ assert.ok(logs.some(x=>x.event==='gateway_ws_openai_message_dropped'));
+ c.ws.close();
+});
+
+test('a compaction request to OpenAI gets Claude checkpoints as text too',async t=>{
+ const {openai,post,base,app}=await setup(t);
+ const history=[user('remember amber pine 742','u1'),{type:'message',role:'assistant',content:[{type:'output_text',text:'ok'}]}];
+ const out=events(await(await post({model:'claude-sonnet',stream:true,tools,input:[...history,{type:'compaction_trigger'}]},{'x-codex-turn-metadata':'{"request_kind":"compaction"}'})).text()).at(-1).response.output;
+ const item=out.find(x=>x.type==='compaction');
+ const res=await fetch(base+'/responses/compact',{method:'POST',headers:{...app,'Content-Type':'application/json'},body:JSON.stringify({model:'gpt-fixture',input:[...history,item]})});
+ await res.text();
+ const sent=JSON.parse(openai.seen.http.at(-1).body.toString());
+ assert.ok(!JSON.stringify(sent).includes('claude-bridge-v1:'));
+ assert.match(sent.input[2].content[0].text,/<context_checkpoint>/);
 });

@@ -173,6 +173,6 @@ test('web search stays off on the app provider until it is turned on',async t=>{
 
 test('a key route without picker mode leaves the gateway routes closed',async t=>{
  const {b}=await setup(t);
- assert.equal((await fetch(`${b.url}/g/${KEY}/backend-api/codex/models`)).status,401);
- assert.match(await upgrade(b.url,`/g/${KEY}/backend-api/codex/responses`),/^HTTP\/1\.1 401 /);
+ assert.equal((await fetch(`${b.url}/g/${KEY}/backend-api/codex/models`)).status,403);
+ assert.match(await upgrade(b.url,`/g/${KEY}/backend-api/codex/responses`),/^HTTP\/1\.1 403 /);
 });

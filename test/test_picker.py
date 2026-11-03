@@ -42,8 +42,10 @@ class PickerTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop('CLAUDE_BRIDGE_RUNTIME') if previous is None else os.environ.__setitem__('CLAUDE_BRIDGE_RUNTIME', previous))
 
     def run_picker(self, *args):
-        with contextlib.redirect_stdout(io.StringIO()):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
             picker.main([*args, '--codex-home', str(self.codex), '--no-service'])
+        return out.getvalue()
 
     def test_install_adds_one_marked_setting_and_backs_up_both_files(self):
         self.run_picker('install')
@@ -115,7 +117,51 @@ class PickerTests(unittest.TestCase):
         self.run_picker('install')
         config.write_text(config.read_text().replace('effort = "high"', 'effort = "max"').replace('# a comment', 'model = "claude-opus"\n# a comment'))
         self.run_picker('uninstall')
-        self.assertTrue(config.read_text().startswith('# a comment the user wrote\n'), config.read_text())
+        # The effort from before this install comes back; the Claude default goes.
+        self.assertTrue(config.read_text().startswith('model_reasoning_effort = "high"\n# a comment the user wrote\n'), config.read_text())
+
+    def test_a_quoted_key_or_single_quoted_provider_is_read_as_toml_reads_it(self):
+        config = self.codex/'config.toml'
+        config.write_text('"openai_base_url" = "https://proxy.example/v1"\n')
+        with self.assertRaises(SystemExit):
+            self.run_picker('install')
+        self.assertEqual(config.read_text(), '"openai_base_url" = "https://proxy.example/v1"\n')
+        config.write_text("model_provider = 'openai'\n")
+        self.run_picker('install')
+        self.assertIn('openai_base_url = "http://127.0.0.1:19490/g/', config.read_text())
+
+    def test_the_setting_is_added_again_when_it_went_missing(self):
+        config = self.codex/'config.toml'
+        self.run_picker('install')
+        config.write_bytes(CONFIG)
+        self.assertIn('Picker mode: off', self.run_picker('status'))
+        self.run_picker('install')
+        self.assertTrue(picker.still_set(config.read_text()))
+        self.assertIn('Picker mode: on', self.run_picker('status'))
+
+    def test_a_profile_without_a_config_file_gets_none_back(self):
+        config = self.codex/'config.toml'
+        config.unlink()
+        self.run_picker('install')
+        self.assertTrue(config.exists())
+        self.run_picker('uninstall')
+        self.assertFalse(config.exists())
+
+    def test_uninstall_without_the_runtime_folder_keeps_crlf_line_endings(self):
+        config = self.codex/'config.toml'
+        config.write_bytes(CONFIG.replace(b'\n', b'\r\n'))
+        self.run_picker('install')
+        (self.runtime/'picker.json').unlink()
+        self.run_picker('uninstall')
+        self.assertEqual(config.read_bytes(), CONFIG.replace(b'\n', b'\r\n'))
+
+    def test_uninstall_keeps_the_users_effort_when_there_was_no_default_model(self):
+        config = self.codex/'config.toml'
+        config.write_text('model_reasoning_effort = "high"\n\n[features]\nx = true\n')
+        self.run_picker('install')
+        config.write_text(config.read_text().replace('model_reasoning_effort = "high"', 'model = "claude-opus"\nmodel_reasoning_effort = "max"'))
+        self.run_picker('uninstall')
+        self.assertEqual(config.read_text(), 'model_reasoning_effort = "high"\n\n[features]\nx = true\n')
 
     def test_a_model_line_inside_a_multi_line_string_is_left_alone(self):
         text = 'developer_instructions = """\nmodel = "claude-opus"\n"""\nmodel = "claude-haiku"\n\n[features]\n'
@@ -236,7 +282,8 @@ class PickerTests(unittest.TestCase):
         self.run_picker('install')
         self.assertIn('openai_base_url', (self.codex/'config.toml').read_text())
         self.run_picker('uninstall')
-        self.assertEqual((self.codex/'config.toml').read_bytes(), b'')
+        # A profile that had no config.toml gets none back.
+        self.assertFalse((self.codex/'config.toml').exists())
 
 
 if __name__ == '__main__':

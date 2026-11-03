@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
+import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
@@ -146,7 +146,7 @@ export class Session {
     this.log(reason,{source:'desktop_transcript'});
     const child=this.child;
     if(child){this.cancel(reason);await this.exiting;}
-    this.pending.clear();this.results.clear();this.nativeCalls=[];this.resumeItems=null;this.truncate=null;
+    this.pending.clear();this.results.clear();this.nativeCalls=[];this.resumeItems=null;this.otherAfterStop=null;this.truncate=null;
     this.record={claudeId:randomUUID(),seen:[],started:false,recoveredFrom:this.record.claudeId,lastReplyAt:this.record.lastReplyAt};this.save();
   }
   // A stopped turn leaves a consistent native transcript. Claude Code keeps the
@@ -157,7 +157,8 @@ export class Session {
   async resumeOrRecover(body) {
     const stop=!body.__bridge_compaction&&this.record.stop;
     this.resumeItems=stop?afterStop(body.input,this.record.history,stop.seen,this.record.delivered):null;
-    if(this.resumeItems){this.log('stopped_turn_resumed',{reason:stop.reason,items:this.resumeItems.length,steer:resampledSteer(this.resumeItems,stop.reason)});return;}
+    this.otherAfterStop=this.resumeItems?otherModelAfterStop(body.input,this.record.history):null;
+    if(this.resumeItems){this.log('stopped_turn_resumed',{reason:stop.reason,items:this.resumeItems.length,steer:!this.otherAfterStop&&resampledSteer(this.resumeItems,stop.reason),other_model_items:this.otherAfterStop?.after.length??0});return;}
     // A request that no longer contains the stopped turn, as when the user
     // edits or withdraws its message, rebuilt the session 9 times in the
     // separate-window bridge's log from October 5 to 13, 2026. When the request
@@ -266,19 +267,23 @@ export class Session {
     this.log('tool_result',{call_id:id,...(items.length>1?{outputs:items.length}:{})});
   }
   async accept(body,res,onComplete) {
-    if(this.accepting)throw new Error('This conversation is already accepting a request.');
+    // A Stop and a quick resend reach the bridge while the stopped request is
+    // still waiting for the previous turn's process to exit. That request ends
+    // on its own once it sees the Stop, so the resend waits for it.
+    while(this.accepting)await this.acceptance;
     this.accepting=true;
+    let accepted;this.acceptance=new Promise(resolve=>{accepted=resolve;});
     this.lastUsed=Date.now();
     // The desktop can stop or disconnect while the request is still being set up.
     let gone=!!res.destroyed;const left=()=>{gone=true;};res.once('close',left);
     try {await this.acceptRequest(body,res,onComplete,()=>gone);}
     catch(error){if(this.stream?.res===res)this.fail(error.message);throw error;}
-    finally {this.accepting=false;res.off('close',left);}
+    finally {this.accepting=false;accepted();res.off('close',left);}
   }
   async acceptRequest(body,res,onComplete,gone) {
     if(this.exiting) await this.exiting;
     if(this.stream && !this.stream.finished) throw new Error('This conversation already has an active response.');
-    this.stopping=false;this.resumeItems=null;this.truncate=null;
+    this.stopping=false;this.resumeItems=null;this.otherAfterStop=null;this.truncate=null;
     // A killed process cannot restore an in-flight MCP promise. A stopped turn
     // resumes its native session. Anything else recovers from the host's
     // authoritative transcript in a new one, preserving observed tool results
@@ -375,6 +380,9 @@ export class Session {
     let input;
     if(fork) {
       input=[...(fork.stopped?stoppedTurnNote(fork.extra,fork.stopped):[]),...(fork.extra.length?userInput(fork.extra,{replay:true,prefix:false}):[]),{type:'text',text:COMPACTION_REQUEST}];
+    } else if(this.resumeItems&&this.otherAfterStop) {
+      const {before,after}=this.otherAfterStop;const stopped=new Set(before);
+      input=[...resumeAfterStop(this.resumeItems.filter(x=>stopped.has(x)),this.record.stop,{more:true}),{type:'text',text:OTHER_MODEL_NOTE},...userInput(after,{replay:true,prefix:false}),...replayImageNote(after,{otherModel:true})];
     } else if(this.resumeItems) {
       input=resumeAfterStop(this.resumeItems,this.record.stop);
     } else if(this.record.started) {
@@ -388,7 +396,7 @@ export class Session {
       if(replay)this.log('history_import',{reason:'new_or_compacted_context'});
     }
     // A message the desktop resent mid-response is a mid-turn message, which gets no time note.
-    const steered=!fork&&this.resumeItems&&resampledSteer(this.resumeItems,this.record.stop?.reason);
+    const steered=!fork&&this.resumeItems&&!this.otherAfterStop&&resampledSteer(this.resumeItems,this.record.stop?.reason);
     // A goal continuation names update_goal, which code mode runs only inside exec.
     if(!body.__bridge_compaction)input=[...input,...goalToolNote(body.input,body.tools)];
     if(!body.__bridge_compaction&&!steered&&userTurn(body.input))input=[...input,timeNote(Date.now(),this.record.lastReplyAt)];
@@ -457,7 +465,7 @@ export class Session {
     this.child=spawn(this.bridge.claude,args,{cwd:this.bridge.claudeCwd,env,stdio:['pipe','pipe','pipe']});
     this.stopping=false;
     const child=this.child;this.stderr='';this.nativeCalls=[];this.ready=false;this.forked=!!fork;
-    this.steers.clear();this.deferredStop=null;this.lastAssistant=null;this.apiError=null;this.refusal=null;this.truncating=!!truncate;
+    this.steers.clear();this.ack=null;this.deferredStop=null;this.lastAssistant=null;this.apiError=null;this.refusal=null;this.truncating=!!truncate;
     // Where a withdrawn turn returns to: the end of the last completed turn.
     // A truncating resume keeps the same point.
     if(!truncate)this.record.settled=!fork&&this.record.started&&!this.record.inflight&&this.record.turnEnd?{history:this.record.history,at:this.record.turnEnd}:null;

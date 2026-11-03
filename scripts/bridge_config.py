@@ -6,6 +6,7 @@ which setup.py writes. CLAUDE_BRIDGE_RUNTIME moves the runtime directory.
 import json
 import os
 import pathlib
+import re
 
 PROJECT = 'claude-for-chatgpt-desktop'
 APP_NAME = 'Claude for ChatGPT Desktop'
@@ -53,49 +54,125 @@ def load_models(path=None):
     return {'default': default, 'models': models}
 
 
-def root_end(text):
-    """Offset of the line with the first table header in a TOML file.
-
-    Skips comments, strings of all four kinds and the lines of a multi-line
-    array, any of which can hold a line that starts with [ or an unpaired quote.
-    """
-    i, depth, line_start = 0, 0, True
-    while i < len(text):
+def _statement_end(text, i):
+    """Index just past the newline that ends the statement starting at i."""
+    depth, n = 0, len(text)
+    while i < n:
         c = text[i]
-        if c == '\n':
-            line_start = True
-        elif c == '#':
-            i = text.find('\n', i)
-            if i < 0:
-                return len(text)
+        if c == '\n' and not depth:
+            return i+1
+        if c == '#':
+            j = text.find('\n', i)
+            if j < 0:
+                return n
+            i = j
             continue
-        elif c not in ' \t\r':
-            if c == '[' and line_start and not depth:
-                return text.rfind('\n', 0, i)+1
-            line_start = False
-            if text.startswith(('"""', "'''"), i):
-                quote = text[i:i+3]
-                i += 3
-                while i < len(text) and not text.startswith(quote, i):
-                    i += 2 if quote == '"""' and text[i] == '\\' else 1
-                if i >= len(text):
-                    return len(text)
-                # A multi-line string can end with up to two more quotes.
-                i += 3
-                while i < len(text) and text[i] == quote[0]:
-                    i += 1
-                continue
-            if c in '"\'':
+        if text.startswith(('"""', "'''"), i):
+            quote = text[i:i+3]
+            i += 3
+            while i < n and not text.startswith(quote, i):
+                i += 2 if quote == '"""' and text[i] == '\\' else 1
+            if i >= n:
+                return n
+            # A multi-line string can end with up to two more quotes.
+            i += 3
+            while i < n and text[i] == quote[0]:
                 i += 1
-                while i < len(text) and text[i] not in (c, '\n'):
-                    i += 2 if c == '"' and text[i] == '\\' else 1
-            elif c == '[':
-                depth += 1
-            elif c == ']':
-                depth = max(0, depth-1)
+            continue
+        if c in '"\'':
+            i += 1
+            while i < n and text[i] not in (c, '\n'):
+                i += 2 if c == '"' and text[i] == '\\' else 1
+            if i < n and text[i] == c:
+                i += 1
+            continue
+        if c in '[{':
+            depth += 1
+        elif c in ']}':
+            depth = max(0, depth-1)
         i += 1
-    return len(text)
+    return n
 
+
+def _key(body):
+    key, quote = '', None
+    for c in body:
+        if quote:
+            if c == quote:
+                quote = None
+            else:
+                key += c
+        elif c in '"\'':
+            quote = c
+        elif c == '=':
+            break
+        else:
+            key += c
+    return re.sub(r'[ \t]*\.[ \t]*', '.', key.strip())
+
+
+def statements(text):
+    """The top-level lines of a TOML file, as (kind, name, start, end).
+
+    kind is 'table' or 'array' for a [table] or [[array]] header, 'key' for a
+    key = value line, or 'comment'. start is where the line starts and end is
+    just past its newline, so a value that spans lines, such as a multi-line
+    string or array, is one statement. Lines inside those values are never
+    statements, whatever they look like.
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        start = i
+        while i < n and text[i] in ' \t\r':
+            i += 1
+        if i >= n:
+            break
+        if text[i] == '\n':
+            i += 1
+            continue
+        if text[i] == '#':
+            j = text.find('\n', i)
+            end = n if j < 0 else j+1
+            out.append(('comment', text[i:end].rstrip('\r\n'), start, end))
+        else:
+            end = _statement_end(text, i)
+            body = text[i:end]
+            if body.startswith('['):
+                array = body.startswith('[[')
+                close = re.match(r'\[\[?(.*?)\]\]?[ \t]*(#.*)?\r?\n?$', body, re.S)
+                out.append(('array' if array else 'table', close.group(1).strip() if close else body.strip(), start, end))
+            else:
+                out.append(('key', _key(body), start, end))
+        i = end
+    return out
+
+
+def root_end(text):
+    """Offset of the line with the first table header in a TOML file."""
+    return next((start for kind, _, start, _ in statements(text) if kind in ('table', 'array')), len(text))
+
+
+def drop_statements(text, drop):
+    """text without the top-level statements for which drop(kind, name) is true."""
+    kept, pos = [], 0
+    for kind, name, start, end in statements(text):
+        if drop(kind, name):
+            kept.append(text[pos:start])
+            pos = end
+    return ''.join(kept)+text[pos:]
+
+
+def string_value(text, statement):
+    """The value of a key = "string" statement, or None for any other value."""
+    match = re.fullmatch(r'[^=]*=[ \t]*(?:"((?:[^"\\\n]|\\.)*)"|\'([^\'\n]*)\')[ \t]*(?:#[^\n]*)?\r?\n?', text[statement[2]:statement[3]].lstrip(' \t'))
+    if not match:
+        return None
+    if match.group(2) is not None:
+        return match.group(2)
+    try:
+        return json.loads('"'+match.group(1)+'"')
+    except ValueError:
+        return None
 
 def service_env(runtime, config):
     """Environment for the bridge process, derived from launch.json."""
