@@ -452,3 +452,17 @@ test('a compaction request to OpenAI gets Claude checkpoints as text too',async 
  assert.ok(!JSON.stringify(sent).includes('claude-bridge-v1:'));
  assert.match(sent.input[2].content[0].text,/<context_checkpoint>/);
 });
+
+test('a Claude request past 64 MiB in picker mode is answered, and a large GPT one still reaches OpenAI',async t=>{
+ const {openai,post}=await setup(t);
+ const shots=Array.from({length:18},(_,i)=>({type:'message',id:'shot'+i,role:'user',content:[{type:'input_text',text:'still '+i},{type:'input_image',image_url:'data:image/png;base64,'+i+'A'.repeat(4*1024*1024)}]}));
+ const answered={type:'message',id:'msg_seen',role:'assistant',content:[{type:'output_text',text:'Seen them.'}]};
+ const ask=text=>Buffer.from(JSON.stringify({stream:true,input:[...shots,answered,user(text,'u1')],tools}));
+ const claude=await post(null,{'Content-Encoding':'zstd'},zstdCompressSync(Buffer.from(JSON.stringify({model:'claude-opus',...JSON.parse(ask('echo-input after the screenshots'))}))));
+ assert.equal(claude.status,200);
+ assert.match(JSON.stringify(events(await claude.text()).at(-1).response.output),/ECHO .*after the screenshots/);
+ assert.equal(openai.seen.http.length,0);
+ const gpt=await post(null,{'Content-Encoding':'zstd'},zstdCompressSync(Buffer.from(JSON.stringify({model:'gpt-fixture',...JSON.parse(ask('for GPT'))}))));
+ assert.equal(gpt.status,200);await gpt.text();
+ assert.equal(openai.seen.http.length,1);
+});

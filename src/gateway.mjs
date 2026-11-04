@@ -11,6 +11,7 @@ import {WebSocketServer, WebSocket} from 'ws';
 import {digest, uid, isBridgeId, checkpointText} from './protocol.mjs';
 import {catalogEntries, pickTemplate} from './catalog.mjs';
 import {labeled} from './models.mjs';
+import {parseJson, jsonBuffer, MAX_REQUEST_BYTES} from './large-json.mjs';
 
 export const GATEWAY_UPSTREAM='https://chatgpt.com/backend-api/codex';
 const ROUTE='/backend-api/codex';
@@ -211,7 +212,8 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
   const track=promise=>{active++;return Promise.resolve(promise).finally(()=>{active--;});};
   // The app's side of each connection takes the subprotocol OpenAI accepted.
   const protocols=new WeakMap();
-  const wss=new WebSocketServer({noServer:true,perMessageDeflate:true,maxPayload:256*1024*1024,handleProtocols:(offered,req)=>protocols.get(req)||false});
+  // A Claude request carries the whole chat, screenshots included.
+  const wss=new WebSocketServer({noServer:true,perMessageDeflate:true,maxPayload:MAX_REQUEST_BYTES,handleProtocols:(offered,req)=>protocols.get(req)||false});
   const handshakeHeaders=new WeakMap();
   wss.on('headers',(headers,req)=>{const extra=handshakeHeaders.get(req);if(extra)headers.push(...extra);});
 
@@ -233,7 +235,7 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     let body=raw;
     if(req.method==='POST'&&sub.startsWith('/responses')&&decoded) {
       const prepared=prepareForOpenAI(decoded.input,bridge.token);
-      if(prepared){body=Buffer.from(JSON.stringify({...decoded,input:prepared.input}));delete req.headers['content-encoding'];logPrepared(log,prepared,'http');}
+      if(prepared){body=jsonBuffer({...decoded,input:prepared.input});delete req.headers['content-encoding'];logPrepared(log,prepared,'http');}
     }
     return track(relayHttp(req,res,target,body,{tag:tagNow(),log}));
   }
@@ -299,7 +301,7 @@ export function createGateway({bridge,key,upstream=GATEWAY_UPSTREAM,serve,log=()
     // An error here would end the whole bridge, and with it every chat.
     client.on('message',(data,isBinary)=>{try{
       let message=null;
-      if(!isBinary)try{message=JSON.parse(data.toString());}catch{}
+      if(!isBinary)try{message=parseJson(data);}catch{}
       if(message?.type==='response.create'&&bridge.models.get(message.model)) {
         last='claude';
         if(pending&&up.readyState===WebSocket.OPEN&&!waiting) {

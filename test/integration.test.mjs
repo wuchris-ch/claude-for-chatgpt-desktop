@@ -961,3 +961,35 @@ test('GPT turns after a stopped Claude turn reach Claude as the other model\'s, 
  assert.equal(report.resume,record(dir,logs).claudeId);
  assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.other_model_items===5));
 });
+test('a thread whose screenshots take its request past 64 MiB is read in pieces and answered',async t=>{
+ // November 3: 117 screenshots from tool calls took one thread past 256 MiB,
+ // and the desktop got a 413 on every retry.
+ const {b,logs}=await setup(t);
+ const shot=i=>'data:image/png;base64,'+String(i).padStart(4,'0')+'A'.repeat(4*1024*1024);
+ const steps=Array.from({length:20},(_,i)=>[{type:'custom_tool_call',call_id:'s'+i,name:'exec',input:'screenshot'},
+  {type:'custom_tool_call_output',call_id:'s'+i,output:[{type:'input_text',text:'still '+i},{type:'input_image',image_url:shot(i)}]}]).flat();
+ const body={...request('echo-input the screenshots are above'),input:[...steps,...request('echo-input the screenshots are above').input]};
+ const raw=Buffer.from(JSON.stringify(body));assert.ok(raw.length>64*1024*1024);
+ const res=await fetch(b.url+'/v1/responses',{method:'POST',headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','Content-Encoding':'zstd','thread-id':'screenshots'},body:zstdCompressSync(raw)});
+ assert.equal(res.status,200);
+ const said=JSON.stringify(output(await res.text()));
+ assert.match(said,/ECHO/);assert.match(said,/the screenshots are above/);
+ assert.equal(logs.some(x=>x.event==='request_error'),false);
+});
+// About 2 GB of memory for a few seconds, so it runs only when asked.
+test('a 600 MB thread, past the old limit and V8\'s longest string, is answered',{skip:!process.env.LARGE_REQUEST_TEST},async t=>{
+ const {b,logs}=await setup(t);
+ const shot=i=>'data:image/png;base64,'+String(i).padStart(4,'0')+'A'.repeat(8*1024*1024);
+ const steps=Array.from({length:75},(_,i)=>[{type:'custom_tool_call',call_id:'s'+i,name:'exec',input:'screenshot'},
+  {type:'custom_tool_call_output',call_id:'s'+i,output:[{type:'input_text',text:'still '+i},{type:'input_image',image_url:shot(i)}]}]).flat();
+ const ask=request('echo-input the screenshots are above');
+ // Written in pieces, since the body itself is longer than a string can be.
+ const pieces=[Buffer.from(JSON.stringify({...ask,input:[]}).slice(0,-2))];
+ for(const item of [...steps,...ask.input])pieces.push(Buffer.from((pieces.length>1?',':'')+JSON.stringify(item)));
+ pieces.push(Buffer.from(']}'));
+ const raw=Buffer.concat(pieces);assert.ok(raw.length>600*1000*1000);
+ const res=await fetch(b.url+'/v1/responses',{method:'POST',headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','Content-Encoding':'zstd','thread-id':'huge'},body:zstdCompressSync(raw)});
+ assert.equal(res.status,200);
+ assert.match(JSON.stringify(output(await res.text())),/ECHO.*the screenshots are above/);
+ assert.equal(logs.some(x=>x.event==='request_error'),false);
+});

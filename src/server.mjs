@@ -10,8 +10,10 @@ import {createSearchHandler, pickerSearch} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
 import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, ResponseStream} from './protocol.mjs';
 import {loadModels, effortFor, labelFor} from './models.mjs';
+import {parseJson, MAX_REQUEST_BYTES} from './large-json.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
-const MAX_REQUEST_BYTES=256*1024*1024;
+const TOO_LARGE='This chat is over 1 GiB with its images, more than the bridge reads. Continue in a new chat.';
+const tooLarge=error=>error.code==='ERR_BUFFER_TOO_LARGE'||error instanceof RangeError?Object.assign(new Error(TOO_LARGE),{statusCode:413}):error;
 export const DEFAULT_PORT=19480;
 export const AUTH_MODES=['claude_login','api_key'];
 // The app's own provider retries a reply that ends without a final event, so a
@@ -132,13 +134,15 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   }});
   const readBody=async req=>{
     const chunks=[];let size=0;
-    for await(const chunk of req){size+=chunk.length;if(size>MAX_REQUEST_BYTES)throw Object.assign(new Error('Desktop request exceeds 256 MiB.'),{statusCode:413});chunks.push(chunk);}
+    for await(const chunk of req){size+=chunk.length;if(size>MAX_REQUEST_BYTES)throw Object.assign(new Error(TOO_LARGE),{statusCode:413});chunks.push(chunk);}
     return Buffer.concat(chunks);
   };
   const decode=(bytes,encoding)=>{
-    if(encoding==='zstd')return zstdDecompressSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
-    if(encoding==='gzip')return gunzipSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
-    if(encoding==='deflate')return inflateSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
+    try {
+      if(encoding==='zstd')return zstdDecompressSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
+      if(encoding==='gzip')return gunzipSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
+      if(encoding==='deflate')return inflateSync(bytes,{maxOutputLength:MAX_REQUEST_BYTES});
+    } catch(error){throw tooLarge(error);}
     if(encoding&&encoding!=='identity')throw new Error(`Unsupported content encoding ${encoding}`);
     return bytes;
   };
@@ -208,7 +212,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         const raw=['GET','HEAD'].includes(req.method)?null:await readBody(req);
         let decoded=null;
         // Compaction requests carry Claude's checkpoints too, which OpenAI can't read.
-        if(req.method==='POST'&&(sub==='/responses'||sub==='/responses/compact')&&raw)try{decoded=JSON.parse(decode(raw,req.headers['content-encoding']).toString());}catch{}
+        if(req.method==='POST'&&(sub==='/responses'||sub==='/responses/compact')&&raw)try{decoded=parseJson(decode(raw,req.headers['content-encoding']));}catch{}
         return await gateway.handleHttp(req,res,sub,url,raw,decoded);
       }
       // The separate window's new chats. A wrong key is refused with 403: a 401
@@ -230,8 +234,9 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         const bytes=decode(await readBody(req),req.headers['content-encoding']);
         // Name the endpoint when a desktop feature posts a non-JSON body, so an
         // unsupported route can be identified from the log.
-        try{body=JSON.parse(bytes.toString());}
-        catch{
+        try{body=parseJson(bytes);}
+        catch(error){
+          if(tooLarge(error)!==error)throw tooLarge(error);
           bridge.log('unsupported_body',{path:url.pathname,content_type:req.headers['content-type']?.split(';')[0],bytes:bytes.length});
           return json(res,url.pathname==='/v1/responses'?400:404,{error:{message:`Unsupported non-JSON request to ${url.pathname}`}});
         }

@@ -1,4 +1,5 @@
 import {digest, isResult} from './protocol.mjs';
+import {jsonBytes} from './large-json.mjs';
 
 // Keep a stable window until a high-water mark is reached. Pruning in batches
 // avoids rebuilding the native session after every subsequent screenshot.
@@ -33,7 +34,7 @@ export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
   if(bytes>HIGH_BYTES||images.length-cutoff>HIGH_COUNT) {
     while(cutoff<images.length-1&&(bytes>LOW_BYTES||images.length-cutoff>LOW_COUNT))bytes-=images[cutoff++].bytes;
   }
-  let total=overhead+Buffer.byteLength(JSON.stringify(input))-sum(images.slice(0,cutoff))-sum(userImages.slice(0,userCutoff));
+  let total=overhead+jsonBytes(input)-sum(images.slice(0,cutoff))-sum(userImages.slice(0,userCutoff));
   if(total>HIGH_TOTAL) {
     // Past the request window, the oldest earlier image goes first, whether
     // a tool returned it or the user attached it.
@@ -61,7 +62,7 @@ export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
 
 export function assertModelInputFits(body) {
   // Leave room below the native request limit for MCP schemas and framing.
-  if(Buffer.byteLength(JSON.stringify(body))>24*1024*1024) {
+  if(jsonBytes(body)>24*1024*1024) {
     throw Object.assign(new Error('The model input still exceeds 24 MiB after bounding earlier images. Reduce the current attachment or text batch, or compact the conversation.'),{statusCode:413});
   }
 }
