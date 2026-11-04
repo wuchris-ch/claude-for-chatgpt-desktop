@@ -40,8 +40,21 @@ const input=readline.createInterface({input:process.stdin});
 let busy=false,linger=false,initialized=false;const queued=[],queuedIds=[];
 // Mirrors Claude Code: a queued message is added to the conversation with the tool result.
 const attachQueued=()=>{for(const id of queuedIds.splice(0))send({type:'command_lifecycle',command_uuid:id,state:'started'});};
+// Long base64 is echoed as a marker, so a test can count the images Claude
+// got without the echo holding them all. A regular expression overflows the
+// stack on runs this long.
+function elideBase64(text) {
+ let out='',start=0,run=0;
+ for(let i=0;i<=text.length;i++) {
+  const c=i<text.length?text.charCodeAt(i):0;
+  if(c>=65&&c<=90||c>=97&&c<=122||c>=48&&c<=57||c===43||c===47||c===61){run++;continue;}
+  if(run>=65536){out+=text.slice(start,i-run)+`<base64 ${run}>`;start=i;}
+  run=0;
+ }
+ return out+text.slice(start);
+}
 input.on('line',async line=>{
- const msg=JSON.parse(line);const request=JSON.stringify(msg.message.content);
+ const msg=JSON.parse(line);const request=elideBase64(JSON.stringify(msg.message.content));
  if(!initialized) {
   initialized=true;
   // Claude Code 2.1.300 refuses a truncating resume before init when the dropped

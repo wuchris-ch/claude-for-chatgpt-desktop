@@ -9,7 +9,17 @@ const HIGH_COUNT=200, LOW_COUNT=100;
 // screenshots are several MiB each and are not part of the tool window.
 const HIGH_TOTAL=20*1024*1024, LOW_TOTAL=12*1024*1024;
 const isImage=c=>c.type==='input_image'||c.type==='image';
-const imageBytes=c=>Buffer.byteLength(c.image_url??c.data??'');
+// Claude Code resizes each image to at most 2000 px a side and compresses it
+// to a 500 KB budget before it sends a request (2.1.317: maxWidth 2000, byte
+// budget 512000), so an image adds at most this much base64 to the request.
+// Counted at the desktop's size, renders of 3 MiB each filled the window on
+// almost every tool call on November 4, and each fill rebuilt the session.
+const SENT_IMAGE_BYTES=Math.ceil(512000*4/3);
+const rawBytes=c=>Buffer.byteLength(c.image_url??c.data??'');
+const imageBytes=c=>Math.min(rawBytes(c),SENT_IMAGE_BYTES);
+const blocks=item=>Array.isArray(item.output)?item.output:Array.isArray(item.content)?item.content:[];
+// How much smaller the input is once Claude Code has compressed its images.
+const compressed=input=>input.reduce((total,item)=>total+blocks(item).filter(isImage).reduce((t,c)=>t+rawBytes(c)-imageBytes(c),0),0);
 const isUserMessage=item=>item.type==='message'&&item.role==='user'&&Array.isArray(item.content);
 // A turn ends with the model's final answer, or with a Stop, which the desktop
 // notes as <turn_aborted>. Commentary and tool calls happen inside the turn.
@@ -44,7 +54,7 @@ export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
   if(bytes>HIGH_BYTES||images.length-cutoff>HIGH_COUNT) {
     while(cutoff<images.length-1&&(bytes>LOW_BYTES||images.length-cutoff>LOW_COUNT))bytes-=images[cutoff++].bytes;
   }
-  let total=overhead+jsonBytes(input)-sum(images.slice(0,cutoff))-sum(userImages.slice(0,userCutoff));
+  let total=overhead+jsonBytes(input)-compressed(input)-sum(images.slice(0,cutoff))-sum(userImages.slice(0,userCutoff));
   if(total>HIGH_TOTAL) {
     // Past the request window, the oldest earlier image goes first, whether
     // a tool returned it or the user attached it.
@@ -72,7 +82,7 @@ export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
 
 export function assertModelInputFits(body) {
   // Leave room below the native request limit for MCP schemas and framing.
-  if(jsonBytes(body)>24*1024*1024) {
+  if(jsonBytes(body)-compressed(body.input)>24*1024*1024) {
     throw Object.assign(new Error('The model input still exceeds 24 MiB after bounding earlier images. Reduce the current attachment or text batch, or compact the conversation.'),{statusCode:413});
   }
 }

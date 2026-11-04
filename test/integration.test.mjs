@@ -974,6 +974,8 @@ test('a thread whose screenshots take its request past 64 MiB is read in pieces 
  assert.equal(res.status,200);
  const said=JSON.stringify(output(await res.text()));
  assert.match(said,/ECHO/);assert.match(said,/the screenshots are above/);
+ // Claude Code sends each at its 500 KB budget, so all 20 fit the window.
+ assert.equal(said.match(/<base64 \d+>/g)?.length,20);
  assert.equal(logs.some(x=>x.event==='request_error'),false);
 });
 // About 2 GB of memory for a few seconds, so it runs only when asked.

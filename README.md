@@ -102,7 +102,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 276 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 277 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
@@ -340,7 +340,7 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 ## Development
 
 ```sh
-npm test               # 276 tests with stand-ins for Claude Code and OpenAI
+npm test               # 277 tests with stand-ins for Claude Code and OpenAI
 node e2e/live.mjs      # eighteen short checks with real Claude Code
 node e2e/app-runtime.mjs   # the app's own runtime against this bridge, with a placeholder login
 ```
