@@ -2,7 +2,17 @@
 
 This file records how the bridge was tested and what was measured. The fixture tests establish adapter behavior. The live checks use real Claude Code, and where noted, the ChatGPT desktop app's own embedded runtime.
 
-Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, 0.3.15 brings fixes from a verification pass of the whole project, and 0.3.16 reads chats with hundreds of megabytes of screenshots. The newest checks come first.
+Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, 0.3.15 brings fixes from a verification pass of the whole project, 0.3.16 reads chats with hundreds of megabytes of screenshots, and 0.3.17 trims the screenshots a compaction keeps. The newest checks come first.
+
+## Release 0.3.17, checked November 4, 2026
+
+### Screenshots kept by a compaction
+
+In the bridge this project grew from, a thread compacted in the middle of a turn, and every request after it failed with "The model input still exceeds 24 MiB after bounding earlier images." The compaction kept 44 of the user's messages ahead of its checkpoint, with 26 screenshots totaling 30.8 MiB, and dropped the answers between them. The image window treats attachments since the model last finished a turn as the current request and never removes them. With no answer left in the history, it read all 44 messages as the current request. This project had the same window.
+
+The messages a compaction kept now count as earlier turns, apart from the newest, which a compaction in the middle of a turn keeps for that turn. The server turns the checkpoint, Claude's or GPT's, into a `<context_checkpoint>` message before the session reads the request, so the window looks for that message as well as the raw item. `test/image-history.test.mjs` builds the same shape with the server's own checkpoint text. Undoing the change, the guard for the newest message, or the match on the checkpoint message each fails it.
+
+The failing request, rebuilt from its rollout (52 items, 30.9 MiB) and sent to a bridge with the stand-in Claude Code, got the same 413 from 0.3.16. 0.3.17 replaced the 23 oldest of the kept screenshots with placeholders and got a reply. 207 Node tests, one more with `LARGE_REQUEST_TEST=1`, and 68 Python tests pass.
 
 ## Release 0.3.16, checked November 3, 2026
 

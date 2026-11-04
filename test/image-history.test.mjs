@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {boundToolImages, assertModelInputFits} from '../src/image-history.mjs';
+import {checkpointText} from '../src/protocol.mjs';
 
 test('image window advances in batches and preserves user images and all tool text',()=>{
  const image={type:'input_image',image_url:'data:image/png;base64,'+'A'.repeat(1024)};
@@ -79,4 +80,33 @@ test('screenshots the user attached stay for the whole turn, while Claude takes 
  const stopped=[earlier,answer,now,...shot(1),{type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The user interrupted.</turn_aborted>'}]},{type:'message',role:'user',content:[{type:'input_text',text:'next'},png(3.5,'e'),png(3.5,'f'),png(3.5,'g')]}];
  const after=boundToolImages(stopped);
  assert.ok(after.userCutoff>=2);assert.equal(after.input.at(-1),stopped.at(-1));
+});
+
+test('after a compaction, the screenshots in the messages it kept give way, apart from the newest',()=>{
+ // November 4: a compaction kept 48 of the user's messages with 31 MiB of
+ // screenshots, and every request after it failed as too large.
+ const kept=i=>({type:'message',role:'user',content:[{type:'input_text',text:'look at this '+i},png(3.5,'k'+i)]});
+ const context=[{type:'message',role:'developer',content:[{type:'input_text',text:'<permissions instructions>'}]},{type:'message',role:'user',content:[{type:'input_text',text:'<environment_context></environment_context>'}]}];
+ const newest={type:'message',role:'user',content:[{type:'input_text',text:'and this one'},png(1.75,'newest')]};
+ // The server reads the compaction item in as a message before the session sees it.
+ const checkpoint={type:'message',id:'cmp_1',role:'user',content:[{type:'input_text',text:checkpointText('claude-bridge-v1:x','token')}]};
+ const next={type:'message',role:'user',content:[{type:'input_text',text:'continue'}]};
+ const input=[...Array.from({length:9},(_,i)=>kept(i)),...context,newest,checkpoint,next];
+ const body={input,tools:[]};
+ assert.throws(()=>assertModelInputFits(body),error=>error.statusCode===413);
+ const bounded=boundToolImages(input);
+ assertModelInputFits({...body,input:bounded.input});
+ assert.ok(Buffer.byteLength(JSON.stringify(bounded.input))<=12*1024*1024);
+ assert.match(bounded.input[0].content[1].text,placeholder);assert.equal(bounded.input[0].content[0].text,'look at this 0');
+ assert.equal(bounded.input.at(-3),newest);assert.equal(bounded.input.at(-1),next);assert.equal(bounded.input.at(-2),checkpoint);
+ // The oldest go first, and the window holds for the next request.
+ assert.equal(bounded.input[8],input[8]);
+ const again=boundToolImages([...input,{type:'message',role:'assistant',content:[{type:'output_text',text:'ok'}]},{type:'message',role:'user',content:[{type:'input_text',text:'more'}]}],bounded.cutoff,bounded.userCutoff);
+ assert.equal(again.userCutoff,bounded.userCutoff);
+ // A compaction in the middle of a turn keeps its newest message, even when
+ // the earlier ones alone would not bring the request into its window.
+ const small=i=>({...kept(i),content:[kept(i).content[0],png(1,'s'+i)]});
+ const midTurn=boundToolImages([...Array.from({length:9},(_,i)=>small(i)),...context,{...newest,content:[newest.content[0],png(14,'big')]},checkpoint]);
+ assert.equal(midTurn.userCutoff,9);
+ assert.equal(midTurn.input.at(-2).content[1].image_url.slice(0,25),'data:image/png;base64,big');
 });

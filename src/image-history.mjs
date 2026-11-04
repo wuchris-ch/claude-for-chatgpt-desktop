@@ -15,6 +15,10 @@ const isUserMessage=item=>item.type==='message'&&item.role==='user'&&Array.isArr
 // notes as <turn_aborted>. Commentary and tool calls happen inside the turn.
 const isTurnEnd=item=>item.type==='message'&&(item.role==='assistant'&&item.phase!=='commentary'||
   ['developer','system'].includes(item.role)&&JSON.stringify(item.content??'').includes('<turn_aborted'));
+// A compaction keeps the user's earlier messages ahead of its checkpoint and
+// drops the answers between them, so no turn in them reads as finished. The
+// server has already turned the checkpoint into a <context_checkpoint> message.
+const isCheckpoint=item=>['compaction','context_compaction'].includes(item.type)||isUserMessage(item)&&!!item.content[0]?.text?.startsWith('<context_checkpoint>');
 
 export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
   // Attachments since the model last finished a turn are the current request
@@ -22,7 +26,13 @@ export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
   // call instead dropped screenshots the user had just attached once Claude's
   // own screenshots in the same turn filled the window, and rebuilt the
   // session in the middle of the turn.
-  const current=input.findLastIndex(isTurnEnd);
+  let current=input.findLastIndex(isTurnEnd);
+  // The messages a compaction kept are earlier turns, apart from the newest,
+  // which a compaction in the middle of a turn keeps for that turn. Reading
+  // them all as the current request kept 31 MiB of screenshots after a
+  // compaction on November 4, and every request after it failed.
+  const compaction=input.findLastIndex(isCheckpoint);
+  if(compaction>current)current=Math.max(current,input.findLastIndex((item,position)=>position<compaction&&isUserMessage(item))-1);
   const images=[], userImages=[];
   input.forEach((item,position)=> {
     if(isResult(item)&&Array.isArray(item.output))for(const c of item.output.filter(isImage))images.push({position,bytes:imageBytes(c)});
