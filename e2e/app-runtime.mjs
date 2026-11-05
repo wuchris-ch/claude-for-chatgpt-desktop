@@ -75,7 +75,8 @@ async function windowMode(search) {
   const logs=[];
   const b=await startBridge({stateDir:state,token,port:0,webSearch:search,searchUpstream:`http://127.0.0.1:${upstream.address().port}/alpha/search`,log:(event,data)=>logs.push({event,...data})});
   catalog(path.join(home,'models.json'));
-  fs.writeFileSync(path.join(home,'config.toml'),`model = "${MODEL}"
+  const configPath=path.join(home,'config.toml');
+  const config=`model = "${MODEL}"
 model_catalog_json = ${JSON.stringify(path.join(home,'models.json'))}
 model_reasoning_effort = "low"
 model_reasoning_summary = "none"
@@ -101,10 +102,11 @@ supports_standalone_web_search = ${search}
 
 [model_providers.claude_bridge.http_headers]
 X-Claude-Bridge-Key = "${token}"
-`);
+`;
+  fs.writeFileSync(configPath,config);
   login(home);
   const requests=()=>logs.filter(x=>x.event==='request');
-  const first=runtime(home,work);let second=null;
+  const first=runtime(home,work);let second=null,old=null;
   try {
     await first.ready;
     const {thread}=await first.call('thread/start',{model:MODEL,cwd:work,approvalPolicy:'never',sandbox:'workspace-write'});
@@ -122,22 +124,35 @@ X-Claude-Bridge-Key = "${token}"
     const recall='What exact text did the shell command print earlier in this conversation? Reply with only that text.';
     const after=await first.turn(thread.id,recall);
     check(name+': next window recalls from the checkpoint',after.status==='completed'&&after.text.includes('runtime-e2e-ok-4417'),after.text.slice(0,160));
-    const legacy=await first.call('thread/start',{model:MODEL,modelProvider:'claude_bridge',cwd:work,approvalPolicy:'never',sandbox:'workspace-write'});
-    const l=await first.turn(legacy.thread.id,'Reply with the single word legacy-provider-ok.');
-    check(name+': a claude_bridge chat beside it',l.status==='completed'&&l.text.includes('legacy-provider-ok')&&requests().at(-1).app_provider===false,l.text.slice(0,120));
-    // Chats keep the provider they started on when a new runtime resumes them.
     await stop(first);
+    // A chat from before the window moved to the app's provider, which
+    // Codex 0.166.0-alpha.6 no longer starts beside it.
+    fs.writeFileSync(configPath,'model_provider = "claude_bridge"\n'+config);
+    old=runtime(home,work);await old.ready;
+    const legacy=await old.call('thread/start',{model:MODEL,cwd:work,approvalPolicy:'never',sandbox:'workspace-write'});
+    const l=await old.turn(legacy.thread.id,'Reply with the single word legacy-provider-ok.');
+    check(name+': a chat on the claude_bridge provider',l.status==='completed'&&l.text.includes('legacy-provider-ok')&&requests().at(-1).app_provider===false,l.text.slice(0,120));
+    await stop(old);
+    // That runtime resumes a chat only on the provider the window selects, so
+    // it refuses the claude_bridge chat until the installer moves it, with the
+    // runtime still running as the app would be.
+    fs.writeFileSync(configPath,config);
     second=runtime(home,work);await second.ready;
+    const refused=await second.call('thread/resume',{threadId:legacy.thread.id,excludeTurns:true}).then(()=>null,error=>error.message);
+    check(name+': before the move, the claude_bridge chat is refused',/modelProviderMismatch/.test(refused??''),String(refused).slice(0,200));
+    const moved=execFileSync('python3',['-I','-c','import sys;sys.path.insert(0,sys.argv[1]);from sync_runtime import follow_window_provider;print(follow_window_provider(sys.argv[2],sys.argv[3],int(sys.argv[4])))',
+      path.join(ROOT,'scripts'),home,token,new URL(b.url).port],{encoding:'utf8'}).trim();
+    check(name+': the installer moves the claude_bridge chat to the app provider',moved==='1',`moved ${moved}`);
     await second.call('thread/resume',{threadId:legacy.thread.id,excludeTurns:true});
     const r1=await second.turn(legacy.thread.id,'Reply with the single word resumed-legacy-ok.');
-    check(name+': a resumed claude_bridge chat stays on claude_bridge',r1.status==='completed'&&r1.text.includes('resumed-legacy-ok')&&requests().at(-1).app_provider===false,r1.text.slice(0,120));
+    check(name+': the moved chat resumes on the app provider',r1.status==='completed'&&r1.text.includes('resumed-legacy-ok')&&requests().at(-1).app_provider===true,r1.text.slice(0,120));
     await second.call('thread/resume',{threadId:thread.id,excludeTurns:true});
     const r2=await second.turn(thread.id,recall);
     check(name+': a resumed app-provider chat stays on it and keeps its checkpoint',r2.status==='completed'&&r2.text.includes('runtime-e2e-ok-4417')&&requests().at(-1).app_provider===true,r2.text.slice(0,120));
-    noProblems(name,[...first.notes,...second.notes],logs);
+    noProblems(name,[...first.notes,...old.notes,...second.notes],logs);
   } catch(error){check(name,false,error.message);}
   finally {
-    await stop(first);await stop(second);await b.close();upstream.closeAllConnections();upstream.close();
+    await stop(first);await stop(old);await stop(second);await b.close();upstream.closeAllConnections();upstream.close();
     console.log('requests:',JSON.stringify(requests().map(x=>[x.app_provider?'app':'bridge',x.request_kind,x.tools,x.items])));
     fs.rmSync(dir,{recursive:true,force:true});
   }

@@ -12,7 +12,7 @@ import subprocess
 import time
 import urllib.request
 from bridge_config import APP_NAME, DEFAULT_PORT, load_launch, load_models, runtime_dir, source_home
-from sync_runtime import refresh_capabilities, set_app_provider
+from sync_runtime import follow_window_provider, refresh_capabilities, set_app_provider
 from runtime_paths import resolve_node
 from release import atomic_write, switch_release
 
@@ -124,6 +124,8 @@ def activate():
     # route is running; an older one would answer with a login error.
     state=health()
     if state is not None:set_app_provider(runtime/'codex',token,enabled=bool(state.get('app_provider')),port=port)
+    # The app resumes a chat only on the provider the window selects.
+    follow_window_provider(runtime/'codex',token,port)
 
 stop_service()
 # The service appends to one log while it runs. An install starts a new log

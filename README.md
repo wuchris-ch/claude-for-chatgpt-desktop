@@ -102,7 +102,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 277 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 281 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
@@ -140,7 +140,7 @@ flowchart LR
 - **GPT requests** go on to OpenAI as the app sends them, with the app's own login, WebSocket connection and compaction. In a chat where Claude also answered, the bridge turns Claude's summaries into text and drops Claude's item ids, which OpenAI can't read.
 - **Claude requests** are answered by the bridge: one headless Claude Code session per chat, resumed each turn, with the app's tools offered over MCP.
 - **Tool calls** go back to the app as ordinary tool calls. The app applies its approvals, runs the tool and returns the result to Claude.
-- **Nothing is patched.** The app bundle isn't modified, and the bridge has no tools of its own. The separate window works the same way, without the OpenAI relay. Its new chats use the app's own provider with a key in the path, because the app shows dictation only on that provider.
+- **Nothing is patched.** The app bundle isn't modified, and the bridge has no tools of its own. The separate window works the same way, without the OpenAI relay. Its chats use the app's own provider with a key in the path, because the app shows dictation only on that provider. Install and launch move chats saved on the earlier `claude_bridge` provider to it, since the app resumes a chat only on the window's provider.
 
 ## Compared with similar projects
 

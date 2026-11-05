@@ -8,6 +8,7 @@ import json
 import pathlib
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -101,8 +102,8 @@ def set_app_provider(codex, token, enabled, port=DEFAULT_PORT):
 
     ChatGPT desktop 26.1016 hides dictation unless config.toml selects its own
     `openai` provider. New threads then reach the bridge through
-    openai_base_url; threads started earlier keep claude_bridge, which stays
-    defined. Only call this with enabled=True while the running bridge reports
+    openai_base_url; follow_window_provider moves threads started earlier,
+    and claude_bridge stays defined. Only call this with enabled=True while the running bridge reports
     app_provider: an older bridge answers the path with 401, which the app
     reads as an expired ChatGPT login. Switching off keeps openai_base_url:
     threads saved on the app's provider resume on it, and without the URL it
@@ -148,6 +149,53 @@ def set_app_provider(codex, token, enabled, port=DEFAULT_PORT):
     temporary.unlink(missing_ok=True);temporary.touch(mode=0o600)
     temporary.write_text(root+tables);shutil.copymode(config,temporary);temporary.replace(config)
     return True
+
+def window_provider(codex, token, port=DEFAULT_PORT):
+    """The provider the window's config.toml selects, when both of the
+    bridge's providers reach this bridge, or None."""
+    config=pathlib.Path(codex)/'config.toml'
+    if not config.exists():return None
+    text=config.read_text()
+    root=text[:root_end(text)]
+    lines=statements(root)
+    urls=[string_value(root,s) for s in lines if s[0]=='key' and s[1]=='openai_base_url']
+    providers=[string_value(root,s) for s in lines if s[0]=='key' and s[1]=='model_provider']
+    if urls!=[app_provider_url(token,port)] or len(providers)>1:return None
+    provider=providers[0] if providers else 'openai'
+    return provider if provider in ('openai',PROVIDER_ID) else None
+
+def move_threads(codex, provider, timeout=10):
+    """Saves every chat on `provider`, the other of the bridge's two providers.
+
+    ChatGPT desktop 26.1029 (Codex 0.166.0-alpha.6) refuses to resume a chat
+    saved on a provider other than the window's, with "This chat uses
+    claude_bridge, but your current provider is openai". Both providers reach
+    this bridge, so a chat can move between them. The app reads a chat's
+    provider from its state database, and records the new one in the chat's
+    rollout when it next resumes it. Returns the number of chats moved.
+    """
+    other={'openai':PROVIDER_ID,PROVIDER_ID:'openai'}[provider]
+    moved=0
+    for path in sorted(pathlib.Path(codex).glob('state_*.sqlite')):
+        try:
+            db=sqlite3.connect(str(path),timeout=timeout,isolation_level=None)
+            try:
+                if 'model_provider' not in {row[1] for row in db.execute('pragma table_info(threads)')}:continue
+                db.execute('begin immediate')
+                moved+=db.execute('update threads set model_provider=? where model_provider=?',(provider,other)).rowcount
+                db.execute('commit')
+            finally:db.close()
+        except sqlite3.Error as error:
+            print(f'Chats in {path.name} keep their provider: {error}',file=sys.stderr)
+    return moved
+
+def follow_window_provider(codex, token, port=DEFAULT_PORT):
+    """Moves saved chats to the provider the window now selects."""
+    try:provider=window_provider(codex,token,port)
+    except (OSError,UnicodeDecodeError) as error:
+        print(f'Chats keep their provider: {error}',file=sys.stderr)
+        return 0
+    return move_threads(codex,provider) if provider else 0
 
 def model_catalog(template, models, started=None):
     """Desktop catalog entries for the Claude models, built from a GPT entry."""

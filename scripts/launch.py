@@ -8,7 +8,7 @@ import subprocess
 import time
 import urllib.request
 from bridge_config import DEFAULT_PORT, load_launch, load_models, runtime_dir, source_home
-from sync_runtime import refresh_capabilities, set_app_provider
+from sync_runtime import follow_window_provider, refresh_capabilities, set_app_provider
 from runtime_paths import resolve_node
 
 argparse.ArgumentParser(description='Start the bridge if needed, then open the separate ChatGPT window that uses only Claude.').parse_args()
@@ -46,6 +46,8 @@ if not healthy():
 # Follows the running bridge, so a rolled-back bridge also gets its provider back.
 state=health()
 if state is not None:set_app_provider(runtime/'codex',token,enabled=bool(state.get('app_provider')),port=port)
+# The app resumes a chat only on the provider the window selects.
+follow_window_provider(runtime/'codex',token,port)
 expected=config['app']+'/Contents/MacOS/ChatGPT --user-data-dir='+str(runtime/'user-data')
 running=any(line.strip()==expected for line in subprocess.check_output(['ps','-axo','command='],text=True).splitlines())
 if running:

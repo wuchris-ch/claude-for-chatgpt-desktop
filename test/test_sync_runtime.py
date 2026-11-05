@@ -8,10 +8,14 @@ try:
     import tomllib
 except ImportError:
     tomllib = None
+import io
+import sqlite3
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]/'scripts'))
-from sync_runtime import provider_key, set_app_provider, refresh_capabilities, enable_standalone_search, set_standalone_search, model_catalog
+from sync_runtime import (provider_key, set_app_provider, refresh_capabilities, enable_standalone_search, set_standalone_search, model_catalog,
+                          app_provider_url, follow_window_provider, move_threads)
 
 
 class PluginIsolationTests(unittest.TestCase):
@@ -203,7 +207,7 @@ class AppProviderTests(unittest.TestCase):
         # test/app-provider.test.mjs checks providerKey against the same value.
         self.assertEqual(provider_key('fixture-secret'), self.KEY)
 
-    def test_switching_on_keeps_the_old_provider_for_earlier_chats_and_is_idempotent(self):
+    def test_switching_on_selects_the_app_provider_and_is_idempotent(self):
         self.assertTrue(set_app_provider(self.codex, 'fixture-secret', enabled=True))
         root = self.root()
         self.assertNotIn('model_provider', root)
@@ -307,6 +311,84 @@ class AppProviderTests(unittest.TestCase):
         self.assertLess(text.index('"""\nmodel = '), text.index('openai_base_url'))
         self.assertLess(text.index('openai_base_url'), text.index('[features]'))
         self.assertNotIn('model_provider', text[:text.index('[features]')])
+
+
+
+class ThreadProviderTests(unittest.TestCase):
+    """ChatGPT desktop 26.1029 resumes a chat only on the provider the window selects."""
+    THREADS = [('legacy', 'claude_bridge', 0), ('archived', 'claude_bridge', 1), ('new', 'openai', 0), ('own', 'other_gateway', 0)]
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='bridge-threads-test-')
+        self.addCleanup(self.temporary.cleanup)
+        self.codex = pathlib.Path(self.temporary.name)
+        (self.codex/'config.toml').write_text(AppProviderTests.CONFIG)
+        self.state = self.codex/'state_5.sqlite'
+        db = sqlite3.connect(str(self.state))
+        db.execute('pragma journal_mode=wal')
+        # The columns and trigger the app's state database has around a chat's provider.
+        db.execute('create table threads (id text primary key, model_provider text not null, archived integer not null,'
+                   ' updated_at integer not null, updated_at_ms integer)')
+        db.execute('create trigger threads_updated_at_ms_after_update after update of updated_at on threads'
+                   ' begin update threads set updated_at_ms = new.updated_at * 1000 where id = new.id; end')
+        db.executemany('insert into threads values (?, ?, ?, 1790000000, 1790000000000)', self.THREADS)
+        db.commit()
+        db.close()
+        # An older database the app no longer reads, and a file without the table, are no reason to fail.
+        sqlite3.connect(str(self.codex/'state_4.sqlite')).close()
+
+    def providers(self):
+        db = sqlite3.connect(str(self.state))
+        try:
+            return dict(db.execute('select id, model_provider from threads'))
+        finally:
+            db.close()
+
+    def test_chats_follow_the_window_provider_both_ways(self):
+        set_app_provider(self.codex, 'fixture-secret', enabled=True)
+        self.assertEqual(follow_window_provider(self.codex, 'fixture-secret'), 2)
+        self.assertEqual(self.providers(), {'legacy': 'openai', 'archived': 'openai', 'new': 'openai', 'own': 'other_gateway'})
+        self.assertEqual(follow_window_provider(self.codex, 'fixture-secret'), 0)
+        set_app_provider(self.codex, 'fixture-secret', enabled=False)
+        self.assertEqual(follow_window_provider(self.codex, 'fixture-secret'), 3)
+        self.assertEqual(self.providers(), {'legacy': 'claude_bridge', 'archived': 'claude_bridge', 'new': 'claude_bridge', 'own': 'other_gateway'})
+
+    def test_moving_a_chat_keeps_its_place_in_the_sidebar(self):
+        set_app_provider(self.codex, 'fixture-secret', enabled=True)
+        follow_window_provider(self.codex, 'fixture-secret')
+        db = sqlite3.connect(str(self.state))
+        try:
+            self.assertEqual(set(db.execute('select updated_at, updated_at_ms from threads')), {(1790000000, 1790000000000)})
+        finally:
+            db.close()
+
+    def test_chats_stay_when_the_window_reaches_something_else(self):
+        before = self.providers()
+        # The claude_bridge provider with no URL for the app's provider: its chats would reach OpenAI.
+        self.assertEqual(follow_window_provider(self.codex, 'fixture-secret'), 0)
+        config = self.codex/'config.toml'
+        bare = AppProviderTests.CONFIG.replace('model_provider = "claude_bridge"\n', '')
+        for text in ['openai_base_url = "https://proxy.example/v1"\n' + bare,
+                     'openai_base_url = "%s"\n' % app_provider_url('another-secret') + bare,
+                     'openai_base_url = "http://127.0.0.1:19480/g/%s/v1"\n' % AppProviderTests.KEY + bare,
+                     'openai_base_url = "%s"\n' % app_provider_url('fixture-secret') + AppProviderTests.CONFIG.replace('"claude_bridge"\nmodel_reasoning', '"other_gateway"\nmodel_reasoning')]:
+            config.write_text(text)
+            self.assertEqual(follow_window_provider(self.codex, 'fixture-secret'), 0, text)
+            self.assertEqual(self.providers(), before)
+        config.unlink()
+        self.assertEqual(follow_window_provider(self.codex, 'fixture-secret'), 0)
+
+    def test_a_busy_database_is_reported_and_left_as_it_was(self):
+        holder = sqlite3.connect(str(self.state), isolation_level=None)
+        holder.execute('begin immediate')
+        try:
+            with unittest.mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                self.assertEqual(move_threads(self.codex, 'openai', timeout=0.1), 0)
+            self.assertIn('state_5.sqlite keep their provider', stderr.getvalue())
+        finally:
+            holder.execute('rollback')
+            holder.close()
+        self.assertEqual(self.providers()['legacy'], 'claude_bridge')
 
 
 if __name__ == '__main__':
