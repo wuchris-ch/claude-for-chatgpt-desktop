@@ -471,7 +471,10 @@ export function asPrompt(content) {
 // Opus often acknowledged a mid-turn message only in thinking, which the
 // desktop never shows, so a changed plan went unseen. The note rides with the
 // message at the end of the conversation, leaving the cached prefix intact.
-export const STEERING_NOTE = '<developer_message>The user sent this while you were working. Before your next tool call, reply to it in one short line of visible text, not only in your thinking, saying what you will do, or change, because of it.</developer_message>';
+// A one-line reply for every message also turned a question into a promise
+// to answer at the end, so a question Opus can already answer gets its answer
+// now.
+export const STEERING_NOTE = '<developer_message>The user sent this while you were working. Before your next tool call, reply to it in visible text, not only in your thinking. If it asks something you can answer from what you already know, answer it there in full and then keep working, rather than saving the answer for the end. Otherwise say in one short line what you will do, or change, because of it.</developer_message>';
 export function steeringPrompt(items) {
   const content = asPrompt(userInput(items, {prefix: false}));
   return items.some(x => x.type === 'message' && x.role === 'user') ? [...content, {type: 'text', text: STEERING_NOTE}] : content;

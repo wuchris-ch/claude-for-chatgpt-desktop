@@ -103,6 +103,11 @@ const scenarios={
     const b=await done(await post('live-steer',{...first,input:[...first.input,...a.output,{type:'function_call_output',call_id:call.call_id,output:'build ok'},user('btw skip deploy, the server is down','u2')]}));
     const i=b.output.findIndex(x=>x.type==='function_call'),j=b.output.findIndex(x=>x.type==='message');
     check('mid-turn message',j>=0&&(i<0||j<i)&&logs.some(x=>x.event==='user_steering'),`visible reply "${say(b.output)}" before ${i<0?'the end':'the next call '+b.output[i].arguments}`);
+    // A question it can already answer is answered now, not promised for the end.
+    const q=await done(await post('live-steer-question',{...first,input:[...first.input,...a.output,{type:'function_call_output',call_id:call.call_id,output:'build ok'},user('quick question while you work, answer now: in two or three sentences, what is a race condition and how do you usually prevent one?','u2')]}));
+    const k=q.output.findIndex(x=>x.type==='function_call');
+    const said=q.output.slice(0,k<0?q.output.length:k).filter(x=>x.type==='message').map(x=>x.content.map(c=>c.text).join('')).join('\n');
+    check('mid-turn question answered before the next call',/race/i.test(said)&&/(lock|mutex|atomic|synchroni|order|shared|same time|concurren)/i.test(said)&&said.length>=150,`${said.length} chars: "${said.slice(0,160)}"`);
   },
   async image() {
     const r=await done(await post('live-image',{...base('claude-haiku'),input:[user('What single color fills this image? One word.','u1',png(220,30,30))]}));
