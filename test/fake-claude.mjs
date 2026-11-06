@@ -27,6 +27,13 @@ const event=x=>send({type:'stream_event',event:x});
 const assistant=content=>{const uuid=randomUUID();entry({kind:'assistant',uuid});send({type:'assistant',uuid,message:{model,content}});};
 const start=()=>event({type:'message_start',message:{model,usage:{input_tokens:10}}});
 const finish=()=>{event({type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:5}});event({type:'message_stop'});send({type:'result',is_error:false,modelUsage:{[model]:{contextWindow:1000000}},permission_denials:[]});};
+// Like the API: a thinking block whose signature marks it a summary of prose
+// Claude wrote in its thinking ("narration") or of its reasoning ("thinking"),
+// among the signature's other fields.
+const field=(n,bytes)=>Buffer.concat([Buffer.from([n<<3|2,bytes.length]),bytes]);
+const signature=kind=>Buffer.concat([Buffer.from([0x08,0x96,0x01]),field(2,Buffer.concat([Buffer.from([0x1d,1,2,3,4]),field(1,field(8,Buffer.from(kind)))]))]).toString('base64');
+const thought=(index,value,kind)=>{event({type:'content_block_start',index,content_block:{type:'thinking',thinking:'',signature:''}});event({type:'content_block_delta',index,delta:{type:'thinking_delta',thinking:value}});
+ event({type:'content_block_delta',index,delta:{type:'signature_delta',signature:signature(kind)}});event({type:'content_block_stop',index});return {type:'thinking',thinking:value,signature:signature(kind)};};
 const text=value=>{start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:value}});assistant([{type:'text',text:value}]);finish();};
 // Mirrors Claude Code 2.1.300: an API error is a synthetic message, then an error result naming the status.
 const apiError=status=>{send({type:'assistant',uuid:randomUUID(),error:status===429?'rate_limit':'server_error',message:{model:'<synthetic>',content:[{type:'text',text:`API Error: ${status} Overloaded.`}]}});
@@ -145,6 +152,9 @@ input.on('line',async line=>{
  }
  if(request.includes('compaction_request')) {
   const report=extra=>text('FORK '+JSON.stringify({fork:process.argv.includes('--fork-session'),resume:arg('--resume'),model,effort:process.argv.includes('--effort')?arg('--effort'):null,tools:listed.tools.map(t=>t.name),prompt:fs.readFileSync(arg('--system-prompt-file'),'utf8').slice(0,40),request:request.slice(0,4000),caching:process.env.DISABLE_PROMPT_CACHING?'off':'on',...extra}));
+  // A summary of prose Claude wrote in its thinking, in the checkpoint's own message.
+  if(request.includes('narrate')){const value='FORK '+JSON.stringify({request:request.slice(0,200)});start();const t=thought(0,'NARRATION DURING COMPACTION','narration');
+   event({type:'content_block_start',index:1,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:1,delta:{type:'text_delta',text:value}});assistant([t,{type:'text',text:value}]);finish();return;}
   if(!request.includes('call-tool-first')){report({});return;}
   const args={input:'text("during compaction");'};start();
   assistant([{type:'tool_use',id:'toolu_compacting',name:'mcp__chatgpt__exec',input:args}]);
@@ -174,6 +184,16 @@ input.on('line',async line=>{
   assistant([{type:'tool_use',id:'toolu_sleep',name:'mcp__chatgpt__clock_sleep',input:args}]);
   event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
   busy=true;await client.callTool({name:'clock_sleep',arguments:args}).catch(()=>{});busy=false;text('SLEPT');return;
+ }
+ if(request.includes('narrate-then-tool')){
+  const next={input:'text("next");'};start();
+  const blocks=[thought(0,'PRIVATE REASONING SUMMARY.','thinking'),thought(1,'The build passed, so I am running the tests next.','narration')];
+  assistant([...blocks,{type:'tool_use',id:'toolu_narrate',name:'mcp__chatgpt__exec',input:next}]);
+  event({type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:5}});event({type:'message_stop'});
+  busy=true;await client.callTool({name:'exec',arguments:next});busy=false;
+  start();const last=thought(0,'Tests pass too.','narration');
+  event({type:'content_block_start',index:1,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:1,delta:{type:'text_delta',text:'DONE'}});
+  assistant([last,{type:'text',text:'DONE'}]);finish();return;
  }
  if(request.includes('think-then-tool')){
   const next={input:'text("next");'};start();

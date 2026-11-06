@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
+import {digest, thinkingKind, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
@@ -57,7 +57,7 @@ export class Session {
   constructor(bridge, key) {
     this.bridge = bridge; this.key = key; this.id = digest(key); this.file = path.join(bridge.stateDir, `${this.id}.json`);
     this.record = this.load();
-    this.pending = new Map(); this.nativeCalls = []; this.results = new Map(); this.textIndices = []; this.tools = [];this.callWaiters=new Set();this.queued=new Map();this.steers=new Map();this.ack=null;
+    this.pending = new Map(); this.nativeCalls = []; this.results = new Map(); this.textIndices = []; this.narration = new Set(); this.tools = [];this.callWaiters=new Set();this.queued=new Map();this.steers=new Map();this.ack=null;
     this.lastUsed=Date.now();
   }
   // A record that cannot be read is set aside, and the thread is imported
@@ -331,7 +331,7 @@ export class Session {
     this.tools=tools;
     if(tools.length&&!body.__bridge_compaction)this.record.toolSet=saveToolSet(this.bridge.stateDir,tools);
     this.sequential=body.parallel_tool_calls===false;
-    this.stream=body.__bridge_compaction?new CompactionStream(res,this.bridge.token,model.slug):new ResponseStream(res,model.slug);this.textIndices=[];this.usage={input_tokens:0,output_tokens:0,total_tokens:0};
+    this.stream=body.__bridge_compaction?new CompactionStream(res,this.bridge.token,model.slug):new ResponseStream(res,model.slug);this.textIndices=[];this.narration.clear();this.usage={input_tokens:0,output_tokens:0,total_tokens:0};
     this.stream.onComplete=onComplete;this.stream.final=!!body.__bridge_final_errors;
     this.streamInput=originalInput;
     const activeStream=this.stream;
@@ -566,7 +566,7 @@ export class Session {
       const e=msg.event;
       if(e.type==='message_start') {
         this.messageCount=(this.messageCount??0)+1;
-        this.currentText=null;this.stopReason=null;if(this.ack)this.ack.thinking='';
+        this.currentText=null;this.stopReason=null;if(this.ack)this.ack.thinking='';this.thoughts=new Map();
         // Only the last message of a compaction is the checkpoint.
         if(this.stream instanceof CompactionStream)this.stream.summary='';
         const u=e.message.usage??{};
@@ -578,6 +578,20 @@ export class Session {
         if(e.content_block.text)this.stream.text(this.currentText,e.content_block.text);
       }
       if(e.type==='content_block_delta'&&e.delta.type==='thinking_delta'&&this.ack)this.ack.thinking+=e.delta.thinking;
+      if(e.type==='content_block_start'&&e.content_block.type==='thinking')this.thoughts?.set(e.index,{text:e.content_block.thinking??'',signature:e.content_block.signature??''});
+      if(e.type==='content_block_delta'&&e.delta.type==='thinking_delta'){const t=this.thoughts?.get(e.index);if(t)t.text+=e.delta.thinking;}
+      if(e.type==='content_block_delta'&&e.delta.type==='signature_delta'){const t=this.thoughts?.get(e.index);if(t)t.signature+=e.delta.signature;}
+      if(e.type==='content_block_stop') {
+        // Prose Claude wrote in its thinking reaches us only as the API's
+        // summary of it. Claude Code shows that summary, so the desktop shows
+        // it as progress commentary. A checkpoint gets only the summary Claude
+        // writes.
+        const t=this.thoughts?.get(e.index);this.thoughts?.delete(e.index);const said=t?.text.trim();
+        if(said&&!(this.stream instanceof CompactionStream)&&thinkingKind(t.signature)==='narration') {
+          const i=this.stream.startText();this.stream.text(i,said);this.textIndices.push(i);this.narration.add(i);this.currentText=null;
+          this.log('narration_shown',{chars:said.length});
+        }
+      }
       if(e.type==='content_block_delta'&&e.delta.type==='text_delta') {
         if(this.currentText==null){this.currentText=this.stream.startText();this.textIndices.push(this.currentText);}
         this.stream.text(this.currentText,e.delta.text);
@@ -597,8 +611,8 @@ export class Session {
         }
         if(this.ack&&(acting||this.textIndices.length))this.ack=null;
         // Under a JSON schema, only the validated structured value is the answer.
-        for(const i of this.textIndices)this.stream.finishText(i,!calls.length&&this.stopReason!=='tool_use'&&!this.schema);
-        this.textIndices=[];
+        for(const i of this.textIndices)this.stream.finishText(i,!this.narration.has(i)&&!calls.length&&this.stopReason!=='tool_use'&&!this.schema);
+        this.textIndices=[];this.narration.clear();
         for(const c of this.nativeCalls)if(c.tool.local&&!c.done&&!this.results.has(c.id))this.showSearch(c);
         if(calls.length)this.emitCalls(this.sequential?calls.slice(0,1):calls);
       }
@@ -665,7 +679,7 @@ export class Session {
   releaseResponse() {
     if(this.stream&&!this.stream.finished)return;
     if(this.stream){this.stream.onComplete=null;this.stream.frames=[];this.stream.output=[];this.stream.res=null;}
-    this.stream=null;this.streamInput=null;this.textIndices=[];this.lastUsed=Date.now();
+    this.stream=null;this.streamInput=null;this.textIndices=[];this.narration.clear();this.lastUsed=Date.now();
   }
   // Claude Code exits within about 3 s of its input closing (1,919 turns). One
   // that hangs is stopped, or the thread's next request would wait forever.

@@ -334,6 +334,28 @@ test('a reply to a mid-turn message written only in thinking is shown before the
  const final=JSON.stringify(output(await(await post({...first,input:[...input,...out,{type:'custom_tool_call_output',call_id:out[1].call_id,output:'next done'}]})).text()));
  assert.match(final,/DONE/);
 });
+test('a summary of prose Claude wrote in its thinking is shown as commentary, and reasoning stays private',async t=>{
+ const {post,logs}=await setup(t);const first=request('narrate-then-tool');
+ const out=output(await(await post(first)).text());
+ assert.deepEqual(out.map(x=>[x.type,x.phase??null]),[['message','commentary'],['custom_tool_call',null]]);
+ assert.equal(out[0].content[0].text,'The build passed, so I am running the tests next.');
+ assert.doesNotMatch(JSON.stringify(out),/PRIVATE REASONING/);
+ const input=[...first.input,...out,{type:'custom_tool_call_output',call_id:out[1].call_id,output:'next done'}];
+ const last=output(await(await post({...first,input})).text());
+ // A summary in the turn's last message is still commentary, not the answer.
+ assert.deepEqual(last.map(x=>[x.content[0].text,x.phase]),[['Tests pass too.','commentary'],['DONE','final_answer']]);
+ assert.equal(logs.filter(x=>x.event==='narration_shown').length,2);
+ // The desktop sends the summaries back as assistant messages, and the session resumes.
+ const next=output(await(await post({...first,input:[...input,...last,...request('echo-input after','user2').input]})).text());
+ assert.match(JSON.stringify(next),/after/);
+ assert.equal(logs.some(x=>['history_import','history_branch_rebuilt','regeneration_rebuilt','error'].includes(x.event)),false);
+});
+test('a compaction checkpoint leaves out the summary of prose Claude wrote in its thinking',async t=>{
+ const {post}=await setup(t);const first=request('hello');
+ const answer=output(await(await post(first)).text());
+ const text=await checkpoint(await compact(post,{...first,input:[...first.input,...answer,request('narrate next question','user2').input[0]]}));
+ assert.match(text,/^FORK /);assert.doesNotMatch(text,/NARRATION DURING COMPACTION/);
+});
 test('a clock.sleep the desktop never answers is stopped and the next message resumes the session',async t=>{
  const {post,logs,dir}=await setup(t,{sleepGraceMs:100});
  const sleepTools=[...tools,{type:'namespace',name:'clock',tools:[{type:'function',name:'sleep',description:'Sleeps.',parameters:{type:'object',properties:{duration_ms:{type:'number'}},required:['duration_ms']}}]}];

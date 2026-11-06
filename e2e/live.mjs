@@ -3,7 +3,7 @@
 // random port with a temporary state folder. Each scenario sends a few short,
 // low-effort requests and uses your normal claude login (or ANTHROPIC_API_KEY
 // with CLAUDE_BRIDGE_AUTH=api_key).
-//   node e2e/live.mjs [models|tools|steer|image|switch|stop|compact|midturn|time|resample|visualize|toolwait|resume ...]
+//   node e2e/live.mjs [models|tools|steer|narration|image|switch|stop|compact|midturn|time|resample|visualize|toolwait|resume ...]
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -108,6 +108,26 @@ const scenarios={
     const k=q.output.findIndex(x=>x.type==='function_call');
     const said=q.output.slice(0,k<0?q.output.length:k).filter(x=>x.type==='message').map(x=>x.content.map(c=>c.text).join('')).join('\n');
     check('mid-turn question answered before the next call',/race/i.test(said)&&/(lock|mutex|atomic|synchroni|order|shared|same time|concurren)/i.test(said)&&said.length>=150,`${said.length} chars: "${said.slice(0,160)}"`);
+  },
+  async narration() {
+    // At high effort Claude often writes its progress in its thinking, which
+    // the API returns only as a summary tagged narration; it is shown as
+    // commentary, the answer stays last, and the next message resumes.
+    const jobs={build:'build ok: 412 files, 3 warnings (unused import in auth.ts)',lint:'lint failed: 2 errors in auth.ts (no-unused-vars)',test:'test: 118 passed, 1 failed (session expiry after 30 minutes)',bench:'bench: p95 latency 212 ms, up from 140 ms last week'};
+    const first={...base('claude-opus',runJob),instructions:'You are a careful engineer working through a checklist.',reasoning:{effort:'xhigh'}};
+    let input=[user('Run the jobs "build", "lint", "test" and "bench" with run_job, one call at a time, waiting for each result. Between calls, tell me what each result means and what it suggests. Then summarize.','u1')];
+    const from=logs.length,phases=[];
+    for(let step=0;step<8;step++){
+      const r=await done(await post('live-narration',{...first,input}));input=[...input,...r.output];
+      phases.push(...r.output.filter(x=>x.type==='message').map(x=>x.phase));
+      const call=r.output.find(x=>x.type==='function_call');if(!call)break;
+      input.push({type:'function_call_output',call_id:call.call_id,output:jobs[JSON.parse(call.arguments).name]??'unknown job'});
+    }
+    const shown=logs.slice(from).filter(x=>x.event==='narration_shown').length;
+    check('narration',shown>0&&phases.at(-1)==='final_answer'&&phases.filter(x=>x==='final_answer').length===1,`${shown} summaries shown among ${phases.filter(x=>x==='commentary').length} commentary items`);
+    await settle();
+    const next=await done(await post('live-narration',{...first,input:[...input,user('Which result worries you most, in one sentence?','u2')]}));
+    check('after narration, the next message resumes',!!say(next.output)&&!logs.slice(from).some(x=>['history_import','history_branch_rebuilt','regeneration_rebuilt','error','request_error'].includes(x.event)),`"${say(next.output).slice(0,100)}"`);
   },
   async image() {
     const r=await done(await post('live-image',{...base('claude-haiku'),input:[user('What single color fills this image? One word.','u1',png(220,30,30))]}));

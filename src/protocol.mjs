@@ -475,6 +475,44 @@ export function asPrompt(content) {
 // to answer at the end, so a question Opus can already answer gets its answer
 // now.
 export const STEERING_NOTE = '<developer_message>The user sent this while you were working. Before your next tool call, reply to it in visible text, not only in your thinking. If it asks something you can answer from what you already know, answer it there in full and then keep working, rather than saving the answer for the end. Otherwise say in one short line what you will do, or change, because of it.</developer_message>';
+// When Claude writes its prose between tool calls in its thinking, the API
+// returns it only as a summary, in a thinking block whose signature marks it
+// "narration"; reasoning is marked "thinking" and comes back empty. Claude Code 2.1.317
+// reads the mark from the signature's protobuf at field 2, then 1, then 8,
+// taking the last of each, and shows narration with "summarized" after it.
+function protobufField(bytes, wanted) {
+  let at = 0, found;
+  const varint = () => {
+    let value = 0;
+    for (let shift = 0; shift < 64; shift += 7) {
+      if (at >= bytes.length) return null;
+      const byte = bytes[at++]; value += (byte & 0x7f) * 2 ** shift;
+      if (byte < 0x80) return value;
+    }
+    return null;
+  };
+  while (at < bytes.length) {
+    const key = varint(); if (key === null) return;
+    const field = Math.floor(key / 8), wire = key % 8;
+    if (wire === 0) { if (varint() === null) return; }
+    else if (wire === 1) at += 8;
+    else if (wire === 5) at += 4;
+    else if (wire === 2) {
+      const length = varint(); if (length === null || length > bytes.length - at) return;
+      if (field === wanted) found = bytes.subarray(at, at + length);
+      at += length;
+    } else return;
+    if (at > bytes.length) return;
+  }
+  return found;
+}
+export function thinkingKind(signature) {
+  if (typeof signature !== 'string' || !signature) return;
+  let bytes = Buffer.from(signature, 'base64');
+  for (const field of [2, 1, 8]) if (!(bytes = protobufField(bytes, field))) return;
+  return bytes.toString();
+}
+
 export function steeringPrompt(items) {
   const content = asPrompt(userInput(items, {prefix: false}));
   return items.some(x => x.type === 'message' && x.role === 'user') ? [...content, {type: 'text', text: STEERING_NOTE}] : content;

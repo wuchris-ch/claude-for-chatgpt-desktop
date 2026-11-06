@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
+import {thinkingKind, visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
 
 test('freeform tools preserve multiline JavaScript without JSON coercion',()=>{
  const [tool]=normalizeTools([{type:'custom',name:'exec',description:'Execute JS'}]);
@@ -340,4 +340,17 @@ test('a Stop during a mid-turn compaction is the user\'s, and a pause alone is t
  assert.doesNotMatch(said([aborted]),/did not reject, stop or interrupt|bridge restart/);
  assert.match(said([]),/paused for a compaction that did not finish.*did not reject, stop or interrupt/);
  assert.doesNotMatch(said([]),/bridge restart/);
+});
+test('the kind of a thinking block is read from its signature, as Claude Code reads it',()=>{
+ const field=(n,bytes)=>Buffer.concat([Buffer.from([n<<3|2,bytes.length]),bytes]);
+ const sign=(...parts)=>Buffer.concat(parts).toString('base64');
+ const inner=kind=>field(1,field(8,Buffer.from(kind)));
+ assert.equal(thinkingKind(sign(Buffer.from([0x08,0x96,0x01]),field(2,Buffer.concat([Buffer.from([0x1d,1,2,3,4]),inner('narration')])))),'narration');
+ assert.equal(thinkingKind(sign(field(2,inner('summary')))),'summary');
+ // The last of a repeated field counts.
+ assert.equal(thinkingKind(sign(field(2,inner('summary')),field(2,inner('narration')))),'narration');
+ // A 64-bit field and a multi-byte length are skipped.
+ const long=Buffer.concat([Buffer.from([0x09,1,2,3,4,5,6,7,8]),Buffer.from([0x22,0x81,0x01]),Buffer.alloc(129,7),inner('narration')]);
+ assert.equal(thinkingKind(sign(field(2,long.subarray(0,0)),Buffer.from([0x12,long.length&0x7f|0x80,long.length>>7]),long)),'narration');
+ for(const bad of [undefined,'',42,'not base64 at all',sign(Buffer.from([0x12,0x7f,1])),sign(field(3,inner('narration'))),sign(Buffer.from([0x0f]))])assert.equal(thinkingKind(bad),undefined);
 });
