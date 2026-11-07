@@ -102,7 +102,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 **Tested**
 
-- 284 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 286 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 

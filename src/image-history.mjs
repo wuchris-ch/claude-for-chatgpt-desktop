@@ -1,4 +1,4 @@
-import {digest, isResult} from './protocol.mjs';
+import {digest, isResult, isCheckpoint} from './protocol.mjs';
 import {jsonBytes} from './large-json.mjs';
 
 // Keep a stable window until a high-water mark is reached. Pruning in batches
@@ -26,9 +26,8 @@ const isUserMessage=item=>item.type==='message'&&item.role==='user'&&Array.isArr
 const isTurnEnd=item=>item.type==='message'&&(item.role==='assistant'&&item.phase!=='commentary'||
   ['developer','system'].includes(item.role)&&JSON.stringify(item.content??'').includes('<turn_aborted'));
 // A compaction keeps the user's earlier messages ahead of its checkpoint and
-// drops the answers between them, so no turn in them reads as finished. The
-// server has already turned the checkpoint into a <context_checkpoint> message.
-const isCheckpoint=item=>['compaction','context_compaction'].includes(item.type)||isUserMessage(item)&&!!item.content[0]?.text?.startsWith('<context_checkpoint>');
+// drops the answers between them, so no turn in them reads as finished (see
+// isCheckpoint).
 
 export function boundToolImages(input, cutoff=0, userCutoff=0, overhead=0) {
   // Attachments since the model last finished a turn are the current request

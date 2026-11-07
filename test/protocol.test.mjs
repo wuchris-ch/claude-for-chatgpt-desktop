@@ -235,6 +235,20 @@ test('an imported history explains the image copies Claude Code lists after it, 
  assert.match(replayImageNote([user([{type:'input_text',text:'q'}],'u1'),call,shot])[0].text,/come from earlier/);
 });
 
+test('after a compaction between turns, only the message after the checkpoint is the new request',()=>{
+ const image={type:'input_image',image_url:'data:image/png;base64,YQ=='};
+ const user=(content,id)=>({type:'message',id,role:'user',content});
+ const checkpoint=user([{type:'input_text',text:'<context_checkpoint>\nsummary\n</context_checkpoint>'}],'c');
+ const kept=[user([{type:'input_text',text:'old'},image],'k1'),user([{type:'input_text',text:'older'},image,image],'k2')];
+ const [plain]=replayImageNote([...kept,checkpoint,user([{type:'input_text',text:'sample reports'}],'u')]);
+ assert.match(plain.text,/kept from earlier turns when the conversation was compacted.*The images come from earlier in the conversation\./);
+ const [pasted]=replayImageNote([...kept,checkpoint,user([{type:'input_text',text:'this one'},image],'u')]);
+ assert.match(pasted.text,/The image in the last user message was attached to it\. The rest come from earlier/);
+ // A desktop compaction item counts as the checkpoint too.
+ assert.match(replayImageNote([...kept,{type:'compaction',encrypted_content:'x'},user([{type:'input_text',text:'next'}],'u')])[0].text,/kept from earlier turns when the conversation was compacted.*The images come from earlier/);
+ // Without a checkpoint, a run of user messages is still the new request.
+ assert.deepEqual(replayImageNote([...kept,user([{type:'input_text',text:'next'}],'u')]),[]);
+});
 test('a bare visualization reference to an existing HTML file gets the desktop markers back',t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge viz '));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const file=path.join(dir,'worker-client-runtime.html');fs.writeFileSync(file,'<div id="x">hi</div>');

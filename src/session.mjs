@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, thinkingKind, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
+import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
@@ -391,7 +391,9 @@ export class Session {
       if(other)this.log('other_model_turns',{items:other.length});
       input=other?[{type:'text',text:OTHER_MODEL_NOTE},...userInput(other,{replay:true,prefix:false}),...replayImageNote(other,{otherModel:true})]:userInput(this.withNotes(body.input,fresh,this.record.history),{prefix:false});
     } else {
-      const replay=body.input.some(x=>x.role==='assistant'||isCallResult(x)||['function_call','custom_tool_call'].includes(x.type)&&!isHostCall(x));
+      // A compacted context is history too, even when the compaction kept only
+      // the user's messages.
+      const replay=body.input.some(x=>x.role==='assistant'||isCallResult(x)||['function_call','custom_tool_call'].includes(x.type)&&!isHostCall(x)||isCheckpoint(x));
       input=[...userInput(body.input,{replay}),...(replay?replayImageNote(body.input):[])];
       if(replay)this.log('history_import',{reason:'new_or_compacted_context'});
     }

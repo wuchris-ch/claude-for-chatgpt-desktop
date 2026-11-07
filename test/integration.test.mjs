@@ -465,6 +465,28 @@ test('a compaction at a turn boundary forks the native session with its prompt, 
  assert.ok(logs.some(x=>x.event==='compaction_fork'&&x.extra_items===1&&x.cold===false));assert.equal(report.caching,'on');
  assert.equal(logs.some(x=>x.event==='history_import'||x.event==='error'),false);
 });
+test('after a compaction between turns, the kept messages start the new window as earlier turns',async t=>{
+ // Like the desktop after a manual compaction: the user's earlier messages,
+ // with their screenshots and no answers between them, then the checkpoint
+ // and the new request.
+ const {post,logs}=await setup(t);
+ const image={type:'input_image',image_url:'data:image/png;base64,YQ=='};
+ const kept=[{type:'message',id:'k1',role:'user',content:[{type:'input_text',text:'look at this screenshot'},image]},
+  {type:'message',id:'k2',role:'user',content:[{type:'input_text',text:'and this one'},image,image]},
+  {type:'message',role:'developer',content:[{type:'input_text',text:'<environment_context>fixture</environment_context>'}]}];
+ const compaction={type:'compaction',id:'cmp_fixture',encrypted_content:sealCheckpoint('EARLIER WORK SUMMARY','fixture-secret')};
+ for(const [thread,ask,attached] of [['kept-plain',[{type:'input_text',text:'sample reports next'}],0],['kept-pasted',[{type:'input_text',text:'and this new one'},image],1]]){
+  const response=await post({...request('x'),input:[...kept,compaction,{type:'message',id:'new',role:'user',content:ask}]},{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':thread}});
+  const text=output(await response.text())[0].content[0].text;assert.match(text,/^REPLAY /);
+  const report=JSON.parse(text.replace(/^REPLAY /,''));
+  assert.match(report.input,/<history_message role="user">\nlook at this screenshot/);
+  assert.match(report.input,/<context_checkpoint>\nEARLIER WORK SUMMARY/);
+  assert.match(report.input,/kept from earlier turns when the conversation was compacted/);
+  assert.match(report.input,attached?/The image in the last user message was attached to it\. The rest come from earlier/:/The images come from earlier in the conversation\./);
+  assert.equal(report.images,3+attached);
+ }
+ assert.equal(logs.filter(x=>x.event==='history_import').length,2);
+});
 test('a compaction of a session idle past the cache lifetime does not write a cache',async t=>{
  const {post,logs,dir}=await setup(t);const first=request('hello');
  const answer=output(await(await post(first)).text());

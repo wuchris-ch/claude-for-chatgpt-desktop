@@ -444,17 +444,31 @@ const isUser = x => x.type === 'message' && x.role === 'user';
 // another thread starts a turn like a user message.
 const isTurnInput = x => isUser(x) || isHostOutput(x);
 const trailingUserMessages = items => items.slice(items.findLastIndex(x => !isTurnInput(x) && !isDeveloper(x)) + 1).filter(isTurnInput);
+// A compaction keeps the user's earlier messages ahead of its checkpoint and
+// drops the answers between them. The server has already turned the
+// checkpoint into a <context_checkpoint> message.
+export const isCheckpoint = item => ['compaction', 'context_compaction'].includes(item.type) ||
+  isUser(item) && Array.isArray(item.content) && !!item.content[0]?.text?.startsWith('<context_checkpoint>');
+// The request that starts this context window: what follows the last checkpoint.
+const afterCheckpoint = items => items.slice(items.findLastIndex(isCheckpoint) + 1);
 // The same happens when another model's turns are shown as history: on
 // October 14, 2026 Haiku opened Claude Code's copy of an image the user had
 // sent GPT with view_image and said it came with the new message.
+// After a compaction at a turn boundary, every kept message precedes the
+// checkpoint with no answer between them, so they all read as the new request:
+// on November 6, 2026, Opus said it would start with "the 54 images you
+// attached", all from earlier turns.
 export function replayImageNote(items, {otherModel = false} = {}) {
-  const attached = imagesIn(trailingUserMessages(items));
+  const compacted = items.some(isCheckpoint);
+  const attached = imagesIn(trailingUserMessages(afterCheckpoint(items)));
   const earlier = imagesIn(items) - attached;
   if (!earlier) return [];
   const origin = attached
     ? `The ${attached === 1 ? 'image' : `${attached} images`} in the last user message ${attached === 1 ? 'was' : 'were'} attached to it. The rest come from earlier in the conversation.`
     : 'The images come from earlier in the conversation.';
-  const source = otherModel ? 'The other model\'s turns above come from the desktop transcript.' : 'The conversation above was imported from the desktop transcript.';
+  const source = otherModel ? 'The other model\'s turns above come from the desktop transcript.'
+    : compacted ? 'The messages before the checkpoint above were kept from earlier turns when the conversation was compacted.'
+    : 'The conversation above was imported from the desktop transcript.';
   return [{type: 'text', text: `<developer_message>${source} Claude Code lists a saved copy of each image in it after this message, as [Image: source: …] lines. ${origin} Each line is a file copy of an image already visible above, not an additional attachment, so there is no need to open it.</developer_message>`}];
 }
 
