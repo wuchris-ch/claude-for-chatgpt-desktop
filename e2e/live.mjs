@@ -3,7 +3,7 @@
 // random port with a temporary state folder. Each scenario sends a few short,
 // low-effort requests and uses your normal claude login (or ANTHROPIC_API_KEY
 // with CLAUDE_BRIDGE_AUTH=api_key).
-//   node e2e/live.mjs [models|tools|steer|narration|image|switch|stop|compact|midturn|time|resample|visualize|toolwait|resume ...]
+//   node e2e/live.mjs [models|tools|steer|narration|image|switch|stop|compact|midturn|time|resample|visualize|toolwait|resume|idle ...]
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {deflateSync, crc32} from 'node:zlib';
 import {spawnSync} from 'node:child_process';
-import {startBridge, evictIdleSessions, findClaude} from '../src/server.mjs';
+import {startBridge, evictIdleSessions, idleCompactions, findClaude} from '../src/server.mjs';
 
 const wanted=process.argv.slice(2);
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-live-'));const logs=[];
@@ -287,6 +287,78 @@ const scenarios={
       // Claude Code's project folder for this run's private working directory.
       try{for(const d of fs.readdirSync(claudeProjects()))if(d.includes(path.basename(rdir)))fs.rmSync(path.join(claudeProjects(),d),{recursive:true,force:true});}catch{}
       fs.rmSync(rdir,{recursive:true,force:true});
+    }
+  },
+  async idle() {
+    // A turn with a tool call over a 25K-token stock list on Opus at xhigh
+    // effort, then the idle timer as it fires 54 minutes later. Claude Code
+    // compacts a fork of the session from the warm cache. A cold return starts
+    // from the summary and still knows the facts; a warm return resumes the
+    // full conversation from the cache. A list of random word pairs was stopped
+    // by the model's safety classifier, so the list is plain stock.
+    const idir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-live-idle-'));const ilogs=[];
+    const ib=await startBridge({stateDir:path.join(idir,'state'),token:'live-secret',port:0,auth,idleCompaction:{minTokens:1000},log:(event,data)=>ilogs.push({event,...data})});
+    const ipost=(thread,body)=>fetch(ib.url+'/v1/responses',{method:'POST',body:JSON.stringify(body),headers:{Authorization:'Bearer live-secret','Content-Type':'application/json','thread-id':thread}});
+    const isettle=async()=>{for(let i=0;i<400&&[...ib.sessions.values()].some(s=>s.child);i++)await new Promise(r=>setTimeout(r,50));};
+    const first={...base('claude-opus',runJob),instructions:'You are a careful engineer. Keep answers short.',reasoning:{effort:'xhigh'}};
+    const parts=['M3 hex bolt','M4 washer','M5 nut','6 mm dowel pin','608 bearing','M2 screw','spring pin','pop rivet','cable tie','O-ring 20 mm'];
+    let seed=7;const rand=n=>{seed=(seed*1103515245+12345)%2147483648;return seed%n;};
+    const inventory=Array.from({length:900},(_,i)=>`SKU-${String(i).padStart(4,'0')}: ${parts[rand(10)]}, quantity ${100+rand(9900)}, bin ${'ABCDEFGH'[rand(8)]}${1+rand(20)}.`);
+    const quantity=/quantity (\d+)/.exec(inventory[234])[1];
+    const ask=`Here is the stock list for the HERON-58 assembly line. SKU-0234 matters most.\n${inventory.join('\n')}\nPlease run the job "build" with run_job, then reply in one line with its result.`;
+    async function firstTurn(thread) {
+      let input=[user(ask,'u1')];let r=await done(await ipost(thread,{...first,input}));
+      const call=r.output.find(x=>x.type==='function_call');
+      if(!call)throw new Error('no tool call: '+say(r.output));
+      input=[...input,...r.output,{type:'function_call_output',call_id:call.call_id,output:'build ok: 412 files, 3 warnings'}];
+      r=await done(await ipost(thread,{...first,input}));input=[...input,...r.output];
+      await isettle();
+      return {input,usage:r.usage};
+    }
+    // Only this thread's timer fires.
+    async function compact(thread) {
+      const [key,candidate]=[...ib.idle.candidates].find(([,c])=>c.thread===thread)??[];
+      if(!candidate)throw new Error('no idle candidate for '+thread);
+      for(const other of [...ib.idle.candidates.keys()])if(other!==key)ib.idle.candidates.delete(other);
+      const n=ilogs.length;
+      await idleCompactions(ib,candidate.cacheAt+54*60000+1);await Promise.all([...ib.idle.jobs]);
+      const session=ib.sessions.get(key),mine=ilogs.slice(n).filter(x=>x.session===session.id.slice(0,12));
+      return {session,log:mine.find(x=>x.event==='idle_compacted')??mine.find(x=>x.event.startsWith('idle_'))};
+    }
+    const notice=output=>output.filter(x=>x.type==='message').find(x=>/^Compacted while idle/.test(x.content[0].text));
+    try {
+      {
+        const thread='live-idle-cold';const {input,usage}=await firstTurn(thread);
+        const {session,log}=await compact(thread);
+        check('idle compaction on a fork',log?.event==='idle_compacted'&&!!session.record.idle&&session.record.idle.claudeId!==session.record.claudeId,JSON.stringify(log));
+        check('idle compaction read the conversation from the cache',log?.cache_read>=0.8*(log?.before??Infinity),`read ${log?.cache_read} of ${log?.before} tokens, wrote ${log?.cache_write}, output ${log?.output}, in ${log?.ms} ms`);
+        // As if the cache had expired since.
+        session.record.idle.at-=60*60000+1;
+        const n=ilogs.length;
+        const next=await done(await ipost(thread,{...first,input:[...input,user('What is the assembly line name, what did the build report, and what is the quantity of SKU-0234? One line.','u2')]}));
+        const shown=next.output.filter(x=>x.type==='message');const answer=shown.at(-1)?.content[0].text??'';
+        check('cold return starts with the notice',shown[0]?.phase==='commentary'&&notice(next.output)===shown[0],`"${shown[0]?.content[0].text}"`);
+        check('cold return keeps the facts',/HERON-58/.test(answer)&&/412|ok/i.test(answer)&&answer.includes(quantity),`"${answer}"; SKU-0234 has quantity ${quantity}`);
+        check('cold return reads far less context',next.usage.input_tokens<usage.input_tokens/3,`${next.usage.input_tokens} input tokens against ${usage.input_tokens} for the first turn`);
+        check('cold return resumes the compacted session',ilogs.slice(n).some(x=>x.event==='idle_compaction_used')&&!ilogs.slice(n).some(x=>/history|rebuilt|error/.test(x.event)),ilogs.slice(n).map(x=>x.event).join(' '));
+      }
+      {
+        const thread='live-idle-warm';const {input,usage}=await firstTurn(thread);
+        const {session,log}=await compact(thread);const original=session.record.claudeId;
+        check('warm: idle compaction read the cache',log?.event==='idle_compacted'&&log.cache_read>=0.8*log.before,`read ${log?.cache_read} of ${log?.before} tokens`);
+        const n=ilogs.length;
+        const next=await done(await ipost(thread,{...first,input:[...input,user('What is the assembly line name? One word.','u2')]}));
+        check('warm return resumes the full conversation from the cache',!notice(next.output)&&next.usage.input_tokens_details.cached_tokens>=0.8*usage.input_tokens&&session.record.claudeId===original,`${next.usage.input_tokens_details.cached_tokens} of ${next.usage.input_tokens} input tokens from cache, "${say(next.output)}"`);
+        check('warm return drops the summary',ilogs.slice(n).some(x=>x.event==='idle_compaction_discarded'&&x.reason==='cache_warm')&&session.record.idle===undefined,ilogs.slice(n).filter(x=>x.event.startsWith('idle_')).map(x=>x.event+' '+(x.reason??'')).join(', '));
+      }
+    } finally {
+      const errors=ilogs.filter(x=>['error','request_error'].includes(x.event));
+      console.log(`  idle: ${ilogs.filter(x=>x.event==='turn_complete').length} completed Claude turns on ${[...new Set(ilogs.filter(x=>x.event==='claude_ready').map(x=>x.model))].join(', ')}, ${errors.length} bridge errors`);
+      if(errors.length)check('idle without bridge errors',false,errors.map(x=>x.message.slice(0,120)).join(' | '));
+      await ib.close();
+      // Claude Code's project folder for this run's private working directory.
+      try{for(const d of fs.readdirSync(claudeProjects()))if(d.includes(path.basename(idir)))fs.rmSync(path.join(claudeProjects(),d),{recursive:true,force:true});}catch{}
+      fs.rmSync(idir,{recursive:true,force:true});
     }
   },
 };

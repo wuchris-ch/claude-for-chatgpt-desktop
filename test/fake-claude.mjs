@@ -60,8 +60,32 @@ function elideBase64(text) {
  }
  return out+text.slice(start);
 }
+// Mirrors Claude Code 2.1.317 running /compact on a fork: status, init, the
+// boundary with token counts, then a result with no text. It refuses the
+// command under --disable-slash-commands. Files beside the system prompt make
+// it fail, refuse, wait or call a tool.
+async function compact() {
+ const dir=path.dirname(arg('--system-prompt-file'));const session_id=process.argv.includes('--fork-session')?randomUUID():arg('--resume');
+ fs.appendFileSync(path.join(dir,'fake-compactions'),JSON.stringify({session_id,from:arg('--resume'),fork:process.argv.includes('--fork-session'),effort:arg('--effort'),requested,model,pin:PINS.opus??null,slash:!process.argv.includes('--disable-slash-commands'),partial:process.argv.includes('--include-partial-messages'),tools:listed.tools.map(t=>t.name),prompt:fs.readFileSync(arg('--system-prompt-file'),'utf8').slice(0,40)})+'\n');
+ if(process.argv.includes('--disable-slash-commands')||fs.existsSync(path.join(dir,'fake-compact-refuse'))) {
+  send({type:'system',subtype:'init',session_id,model,tools:[],mcp_servers:[{name:'chatgpt',status:'connected'}]});
+  send({type:'assistant',session_id,message:{model:'<synthetic>',content:[{type:'text',text:"/compact isn't available in this environment."}]}});
+  send({type:'result',subtype:'success',is_error:false,session_id,result:"/compact isn't available in this environment.",modelUsage:{[model]:{}},permission_denials:[]});return;
+ }
+ send({type:'system',subtype:'status',status:'compacting',session_id});
+ if(fs.existsSync(path.join(dir,'fake-compact-tool')))fs.writeFileSync(path.join(dir,'fake-compact-tool'),JSON.stringify(await client.callTool({name:'exec',arguments:{input:'text("during compaction");'}})));
+ const wait=path.join(dir,'fake-compact-wait');
+ if(fs.existsSync(wait))await new Promise(r=>setTimeout(r,Number(fs.readFileSync(wait,'utf8'))));
+ if(fs.existsSync(path.join(dir,'fake-compact-fail'))){send({type:'result',subtype:'error_during_execution',is_error:true,session_id,errors:['fixture compaction failure'],modelUsage:{},permission_denials:[]});return;}
+ send({type:'system',subtype:'status',status:null,compact_result:'success',session_id});
+ send({type:'system',subtype:'init',session_id,model,tools:['mcp__chatgpt__exec'],mcp_servers:[{name:'chatgpt',status:'connected'}]});
+ send({type:'system',subtype:'compact_boundary',session_id,compact_metadata:{trigger:'manual',pre_tokens:381000,post_tokens:12000}});
+ send({type:'user',session_id,message:{role:'user',content:'This session is being continued from a previous conversation.'}});
+ send({type:'result',subtype:'success',is_error:false,session_id,result:'',modelUsage:{[model]:{}},permission_denials:[]});
+}
 input.on('line',async line=>{
  const msg=JSON.parse(line);const request=elideBase64(JSON.stringify(msg.message.content));
+ if(msg.message.content==='/compact'){initialized=true;await compact();return;}
  if(!initialized) {
   initialized=true;
   // Claude Code 2.1.300 refuses a truncating resume before init when the dropped
@@ -115,6 +139,7 @@ input.on('line',async line=>{
  // Stands in for a long think: no stream events at all until the answer.
  if(request.includes('silent-think')){setTimeout(()=>text('AWAKE'),Number(/silent-think-(\d+)/.exec(request)?.[1]??1000));return;}
  if(request.includes('env-probe')){text('ENV '+process.env.MCP_TOOL_TIMEOUT+' '+process.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH+' idle:'+process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT+' output:'+process.env.MAX_MCP_OUTPUT_TOKENS+' size:'+listed.tools[0]?._meta?.['anthropic/maxResultSizeChars']+' token:'+(process.env.CLAUDE_CODE_OAUTH_TOKEN??'none'));return;}
+ if(request.includes('args-probe')){text('ARGS '+JSON.stringify({model,effort:process.argv.includes('--effort')?arg('--effort'):null,resume:process.argv.includes('--resume')?arg('--resume'):null,session:process.argv.includes('--session-id')?arg('--session-id'):null,prompt:fs.readFileSync(arg('--system-prompt-file'),'utf8').slice(0,40),slashCommands:!process.argv.includes('--disable-slash-commands')}));return;}
  if(request.includes('auth-probe')){text('AUTH '+JSON.stringify({key:process.env.ANTHROPIC_API_KEY??null,oauth:process.env.CLAUDE_CODE_OAUTH_TOKEN??null,base:process.env.ANTHROPIC_BASE_URL??null,configDir:process.env.CLAUDE_CONFIG_DIR??null}));return;}
  if(request.includes('model-probe')){
   const prompt=fs.readFileSync(arg('--system-prompt-file'),'utf8');

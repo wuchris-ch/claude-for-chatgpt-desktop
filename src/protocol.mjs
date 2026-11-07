@@ -358,6 +358,13 @@ const execOnlyNote=exec=>{
   return ` ${lead}. Call them only from exec JavaScript as tools.<name>, for example await tools.${names[0]??others[0]}(...). A top-level call fails, and its whole input has to be written again.`;
 };
 const CHECKPOINT_RULES='Preserve the original objective, user requirements and preferences, decisions, exact file paths and identifiers, tool observations, changed files, completed work, failed attempts, outstanding work, and concrete next steps. Distinguish facts from assumptions. Preserve task-relevant numbers, phrases, constraints and corrections exactly. Do not execute the task or address the user. Output only a structured, concise checkpoint. Aim for 1500 to 4000 words for a long complex conversation and much less for a short one.';
+// The first line of a turn that starts from a summary Claude Code wrote while
+// the thread was idle, as Claude Code notes it in its own transcript.
+const thousands=n=>`${Math.max(1,Math.round(n/1000))}K`;
+export function idleNotice(before,after) {
+  const size=Number.isFinite(before)&&Number.isFinite(after)?` (${thousands(before)} to ${thousands(after)} tokens)`:'';
+  return `Compacted while idle: Claude now works from a summary of the earlier turns${size}, written before the prompt cache expired.`;
+}
 // Sent to a fork of the live session, which keeps its own system prompt so the
 // prompt cache still covers the conversation.
 // The fork still carries the thread's own instructions, such as "answer

@@ -98,11 +98,12 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 - One Claude Code session per chat, resumed each turn and kept running through its tool calls. In daily use, 97 to 98% of input tokens came from the prompt cache.
 - Compaction reuses the cache, even when it fires in the middle of a turn.
+- A chat of 200K tokens or more that sits idle is compacted while its cache is still warm, as Claude Code does. A message after the cache expires starts from the summary and does not write the whole chat to the cache again.
 - Chats full of screenshots stay under the request size limit, and a tool call the app never answers can't hold a session forever.
 
 **Tested**
 
-- 286 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
+- 300 automated tests, including property tests that run every `config.toml` editor on thousands of generated files, plus live checks with real Claude Code, real OpenAI and the app's own runtime. The measurements behind each choice are in [VERIFICATION.md](VERIFICATION.md).
 
 ## Limits
 
@@ -295,6 +296,7 @@ Everything lives in `~/Library/Application Support/Claude for ChatGPT Desktop/`:
 | `sessions/` | Native session records, system prompts and an encrypted retry cache that expires after 24 hours |
 | `logs/` | Request, model, tool-name and lifecycle metadata, and service errors. An install starts a new log once it passes 20 MB |
 | `launch.json`, `token`, `gateway-key` | Settings from setup, and the local keys between the app and the bridge |
+| `settings.json` | Optional, not written by setup: `idleCompaction` and `idleCompactMinTokens` |
 | `picker.json`, `backups/` | Picker mode's record of what it changed, and the backups it restores |
 
 Claude Code keeps its own transcripts of these chats in `~/.claude/projects/`, in the folder whose name ends in `Claude-for-ChatGPT-Desktop-sessions-empty-workspace`. Uninstalling, even with `--delete-data`, leaves them.
@@ -332,6 +334,7 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 - **Prompts.** The app's base prompt is written for Codex. The bridge renames its identity lines for the selected Claude model and tells Claude to ignore Claude Code's own working-directory note. Developer messages before the conversation become the system prompt. Notes the app adds later, such as the date, the open page or an interrupted turn, reach Claude where they occur, so a note does not restart a tool cycle or invalidate the prompt cache.
 - **Patches and host habits.** GPT's `apply_patch` output is constrained by a grammar that MCP cannot carry, so the bridge adds a written patch format guide, plus notes on escaping inside JavaScript and on the shared output budget of an `exec` cell. It also passes on host habits found by benchmarking: render PDFs to images in a temporary folder, keep long jobs in the foreground, and avoid `rm -rf`, which the app refuses. When the app offers its automation tool, it adds how to write a one-time timer that the app's scheduler runs once, at the local time.
 - **Sessions.** Between user turns Claude Code resumes the saved session. Before resuming, the bridge checks the app's transcript against what the session saw. Edits, undo, regeneration and unexpected failures rebuild from the app's transcript. A turn stopped by the user, cut off by a bridge restart, ended by an API error such as an overload or a usage limit, or cut off when Claude Code exits while the app runs a tool resumes its native session; a Stop before Claude Code has started waits for it to start, so the message is recorded once. When the user edits or withdraws a stopped message whose turn sent no tool call, Claude Code resumes at the end of the last completed turn and drops the stopped one. While Claude thinks or writes a long tool call, the bridge sends a no-op event every 10 seconds so the app's stall timer does not fire.
+- **Idle compaction.** Like Claude Code 2.1.299 and later, the bridge compacts a chat of 200K tokens or more after 54 minutes idle, which is 90% of the one-hour prompt cache lifetime. Claude Code does this inside a running process, and the bridge starts Claude Code for each turn, so the bridge's own timer does it between turns. It forks the chat's native session with the session's prompt, tools, model and effort, and runs Claude Code's `/compact` in the fork while the cache is still warm. An alias such as `opus` is pinned to the exact model the session ran, so the fork reads that model's cache. The session itself does not change. If the next message arrives after the cache has expired, the turn resumes the compacted fork and starts with the line "Compacted while idle: Claude now works from a summary of the earlier turns (…), written before the prompt cache expired." If the cache is still warm, the turn resumes the full conversation and the bridge drops the summary. A compaction by the app after the cache has expired also forks the summary. A new message during an idle compaction stops it. The timer skips helper agents' chats, chats that moved to a new context, turns with structured output and stopped turns. It also skips a turn when it fires more than 56 minutes after the turn's last request, as after the Mac slept. `{"idleCompaction": false}` in `settings.json` in the runtime folder turns it off, and `"idleCompactMinTokens"` sets the threshold, at least 100K. Both apply when the service next starts.
 - **Model switching.** Switching Claude models between turns resumes the same native session on the new model; that first request cannot reuse the previous model's cache. If GPT answered in between, its messages and tool activity are passed to the resumed session as history. A compaction keeps the model the session ran on, so its cache still applies.
 - **WebSocket relay.** The bridge connects to OpenAI during the app's handshake, so the headers the app reads from it (turn routing, server model) arrive unchanged, then routes each `response.create` by model. For Claude it rebuilds the full input from the increments the app sends after the first request, answers prewarm requests without inference, and treats `response.interrupt` as a Stop. OpenAI closes connections that sit idle, as this one does while Claude answers; the app's side then stays open for Claude, and a GPT request on it makes the app reconnect. A Claude compaction summary is a sealed item only the bridge can open, so it is turned back into text before a GPT request leaves for OpenAI.
 
@@ -340,8 +343,8 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 ## Development
 
 ```sh
-npm test               # 277 tests with stand-ins for Claude Code and OpenAI
-node e2e/live.mjs      # eighteen short checks with real Claude Code
+npm test               # 300 tests with stand-ins for Claude Code and OpenAI
+node e2e/live.mjs      # 30 short checks with real Claude Code
 node e2e/app-runtime.mjs   # the app's own runtime against this bridge, with a placeholder login
 ```
 

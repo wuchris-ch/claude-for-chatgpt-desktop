@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
+import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, idleNotice, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
@@ -53,6 +53,51 @@ function cardProblem(tool,args) {
 // only says where Claude Code keeps its own login and settings.
 const KEEP_ENV=new Set(['CLAUDE_CONFIG_DIR']);
 const modelChanged=(actual,expected)=>new Error(`Claude Code answered with ${actual} instead of ${expected}. Its safety classifiers can re-run a flagged request on a fallback model; the bridge stops rather than change models silently. Rephrase the request or pick another model.`);
+// A turn that Claude Code 2.1.299 would compact while idle: a finished turn
+// of a main thread, without structured output, that reached minTokens.
+export const idleEligible=(record,minTokens)=>!!minTokens&&record.kind==='turn'&&record.started&&!record.inflight&&!record.stop&&!record.subagent&&!record.structured&&!!record.cacheAt&&(record.contextTokens??0)>=minTokens;
+// Claude Code reports a native session's usage so far, and a fork carries
+// its parent's. The difference is what one run used.
+const nativeUsage=u=>u?{cache_read:u.cacheReadInputTokens??0,cache_write:u.cacheCreationInputTokens??0,input:u.inputTokens??0,output:u.outputTokens??0}:null;
+const usageSince=(now,before)=>now&&before&&Object.keys(now).every(k=>now[k]>=before[k])?Object.fromEntries(Object.keys(now).map(k=>[k,now[k]-before[k]])):{};
+// A compaction that takes longer than this is stopped, and a request waits
+// this long at most for a stopped one to exit.
+const IDLE_COMPACT_TIMEOUT_MS=900000,IDLE_CANCEL_WAIT_MS=10000;
+// Flags every Claude Code run of a session shares. A run that reads the
+// session's prompt cache also sends the same prompt, tools, model and effort.
+function claudeArgs(claudeModel,effort,mcpFile,systemFile) {
+  return ['-p','--model',claudeModel,...(effort?['--effort',effort]:[]),'--input-format','stream-json','--output-format','stream-json','--verbose',
+    '--tools','','--strict-mcp-config','--mcp-config',mcpFile,'--allowedTools','mcp__chatgpt__*','--permission-mode','dontAsk',
+    '--setting-sources','','--system-prompt-snapshot','off','--system-prompt-file',systemFile];
+}
+// pinned is the model id every internal model choice is set to, or null.
+function claudeEnv(bridge,pinned) {
+  const env={...process.env};
+  for(const name of Object.keys(env))if((name.startsWith('ANTHROPIC_')||name.startsWith('CLAUDE_')||name.startsWith('CODEX_'))&&!KEEP_ENV.has(name))delete env[name];
+  if(pinned)Object.assign(env,{ANTHROPIC_DEFAULT_FABLE_MODEL:pinned,ANTHROPIC_DEFAULT_OPUS_MODEL:pinned,ANTHROPIC_DEFAULT_SONNET_MODEL:pinned,ANTHROPIC_DEFAULT_HAIKU_MODEL:pinned,CLAUDE_CODE_SUBAGENT_MODEL:pinned});
+  Object.assign(env,{CLAUDE_CODE_DISABLE_AUTO_MEMORY:'1',DISABLE_AUTOUPDATER:'1',
+    // The desktop owns tool timeouts and yields. Claude Code's ~60 s MCP default
+    // otherwise abandons long host tools while the desktop keeps running them.
+    MCP_TOOL_TIMEOUT:'86400000',
+    // Claude Code also aborts an HTTP MCP call after 300 s without a response
+    // or progress, so a long clock.sleep or build ended the native session.
+    CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT:'0',
+    // The desktop sizes tool output for the model. Claude Code's 25k-token cap
+    // otherwise moves large results, such as browser snapshots, to a file.
+    MAX_MCP_OUTPUT_TOKENS:'200000',
+    // Code mode documents every nested tool (shell, apply_patch, web__run, apps)
+    // inside the exec description, ~355k chars. Claude Code cuts MCP
+    // descriptions at 2048 chars by default, hiding almost all of it.
+    CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH:'4000000'});
+  // Login mode runs the user's own Claude Code login. API key mode hands
+  // Claude Code the configured key, which it then uses instead of a login.
+  if(bridge.auth.mode==='api_key') {
+    const key=bridge.auth.apiKey();
+    if(!key)throw new Error('API key mode is on, but no ANTHROPIC_API_KEY is available to the bridge.');
+    env.ANTHROPIC_API_KEY=key;
+  }
+  return env;
+}
 export class Session {
   constructor(bridge, key) {
     this.bridge = bridge; this.key = key; this.id = digest(key); this.file = path.join(bridge.stateDir, `${this.id}.json`);
@@ -80,6 +125,7 @@ export class Session {
     this.mcp.setRequestHandler(ListToolsRequestSchema, async()=>({tools:this.tools.map(({name,description,inputSchema})=>({name,description,inputSchema,_meta:{'anthropic/maxResultSizeChars':MAX_RESULT_CHARS}}))}));
     this.mcp.setRequestHandler(CallToolRequestSchema, async(req,extra)=> {
       const {name, arguments: args={}} = req.params;
+      if(this.idleJob&&!this.child)return {isError:true,content:[{type:'text',text:'Not run: the host is compacting this conversation.'}]};
       let call;
       try {
         call = await this.matchCall(name,args,extra.signal);
@@ -224,6 +270,7 @@ export class Session {
   async compactionFork(input,turnKey) {
     const id=digest(turnKey);
     const live=[...this.bridge.sessions.values()].find(x=>x.id===id);
+    await live?.stopIdle('desktop_compaction');
     // A turn that just completed may still be closing its process.
     if(live?.exiting&&!live.stream)await live.exiting;
     // The desktop compacts in the middle of a turn after running its tool calls,
@@ -246,7 +293,10 @@ export class Session {
     // The record was last saved when the session's turn ended or was stopped. A
     // turn stopped just now last used the cache at its latest response.
     const cold=Date.now()-(used??fs.statSync(path.join(this.bridge.stateDir,`${id}.json`)).mtimeMs)>CACHE_TTL_MS;
-    return {from:id.slice(0,12),claudeId:record.claudeId,model,ranModels:record.ranModels??[],effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold,stopped:record.inflight?record.stop:null};
+    // Once the cache has expired, a summary written while the thread was idle
+    // stands in for the conversation, as it would for the next turn.
+    const idle=!used&&cold&&!record.inflight&&record.idle?.cacheAt===record.cacheAt&&Date.now()-record.idle.at>CACHE_TTL_MS?record.idle:null;
+    return {from:id.slice(0,12),claudeId:idle?.claudeId??record.claudeId,idle:!!idle,model,ranModels:record.ranModels??[],effort:record.effort,prompt,tools:JSON.parse(tools),extra,cold,stopped:record.inflight?record.stop:null};
   }
   // After a compaction in the middle of a turn, the desktop continues in a new
   // context window and never answers the old session's pending tool call, so
@@ -254,6 +304,83 @@ export class Session {
   releaseCompactedTurn() {
     const turn=this.turnKey&&this.bridge.sessions.get(this.turnKey);
     if(turn?.child&&!turn.stream&&!turn.accepting)turn.cancel('compacted_mid_turn');
+  }
+  // The config holds the bridge token, which any local user could read from
+  // the process list if it were passed inline.
+  writeMcpConfig() {
+    const file=path.join(this.bridge.stateDir,`${this.id}.mcp.json`);
+    fs.writeFileSync(file,JSON.stringify({mcpServers:{chatgpt:{type:'http',url:`${this.bridge.url}/mcp/${this.id}`,headers:{Authorization:`Bearer ${this.bridge.token}`}}}}),{mode:0o600});
+    return file;
+  }
+  // Claude Code compacts the conversation on a fork of the native session
+  // while the cache is still warm, as it does for an idle session of its own.
+  // The session itself does not change; the next turn decides which to resume.
+  async idleCompact(candidate) {
+    const r=this.record;
+    const skip=reason=>this.log('idle_compaction_skipped',{reason});
+    if(this.child||this.stream||this.accepting||this.exiting||this.idleJob)return skip('busy');
+    if(r.cacheAt!==candidate.cacheAt||!idleEligible(r,this.bridge.idle?.minTokens))return skip('session_changed');
+    const read=file=>{try{return fs.readFileSync(path.join(this.bridge.stateDir,file),'utf8');}catch{return null;}};
+    const model=this.bridge.models.get(r.model),prompt=read(`${this.id}.system.txt`),tools=r.toolSet?read(path.join('tool-sets',`${r.toolSet}.json`)):null;
+    if(!model||!r.activeModel||r.effort===undefined||!prompt||digest(prompt)!==r.instructions||!tools)return skip('session_settings_unknown');
+    let finished;this.idleJob=new Promise(resolve=>{finished=resolve;});this.idleCancelled=false;
+    const started=Date.now();
+    try {
+      this.tools=JSON.parse(tools);await this.setupMcp();
+      const result=await this.runIdleCompaction(model,r);
+      if(r!==this.record||r.cacheAt!==candidate.cacheAt||r.inflight||this.child)return skip('session_changed');
+      r.idle={claudeId:result.claudeId,cacheAt:r.cacheAt,at:result.at,before:result.before,after:result.after};this.save();
+      this.log('idle_compacted',{before:result.before,after:result.after,idle_minutes:Math.round((started-r.cacheAt)/60000),ms:Date.now()-started,...result.usage});
+    } catch(error) {this.log('idle_compaction_failed',{message:error.message.slice(0,300)});}
+    finally {this.idleJob=null;this.idleChild=null;this.lastUsed=Date.now();finished();}
+  }
+  runIdleCompaction(model,r) {
+    if(this.idleCancelled)return Promise.reject(new Error('cancelled'));
+    const systemFile=path.join(this.bridge.stateDir,`${this.id}.system.txt`);
+    // Without --disable-slash-commands, which turns /compact off. Neither
+    // flag changes the prompt, so the request reads the session's cache.
+    const args=[...claudeArgs(model.claude_model,r.effort,this.writeMcpConfig(),systemFile),'--resume',r.claudeId,'--fork-session'];
+    // An alias is pinned to the model the session last ran, whose cache this reads.
+    const child=spawn(this.bridge.claude,args,{cwd:this.bridge.claudeCwd,env:claudeEnv(this.bridge,r.activeModel),stdio:['pipe','pipe','pipe']});
+    this.idleChild=child;
+    return new Promise((resolve,reject)=>{
+      let claudeId=null,boundary=null,at=null,ok=false,problem='',stderr='',usage=null;
+      const timer=setTimeout(()=>{problem='timed out';child.kill('SIGTERM');},IDLE_COMPACT_TIMEOUT_MS);timer.unref();
+      createInterface({input:child.stdout}).on('line',line=>{
+        let m;try{m=JSON.parse(line);}catch{return;}
+        claudeId??=m.session_id??null;
+        if(m.type==='system'&&m.subtype==='init'&&m.model!==r.activeModel){problem=`Claude Code started ${m.model} instead of ${r.activeModel}.`;child.kill('SIGTERM');}
+        if(m.type==='system'&&m.subtype==='status'&&m.status==='compacting')at??=Date.now();
+        if(m.type==='system'&&m.subtype==='compact_boundary')boundary=m.compact_metadata??{};
+        // Claude Code answers in text only when it did not run the command.
+        if(m.type==='assistant')problem+=(m.message?.content??[]).map(c=>c.text??'').join('');
+        if(m.type==='result') {
+          const models=Object.keys(m.modelUsage??{});
+          if(models.some(x=>x!==r.activeModel&&!(r.ranModels??[]).includes(x)))problem=`Unexpected model usage: ${models.join(', ')}`;
+          usage=usageSince(nativeUsage(m.modelUsage?.[r.activeModel]),r.nativeUsage);
+          if(m.is_error)problem||=String(m.errors?.join(' ')||m.result||'Claude Code reported an error.');
+          ok=!m.is_error&&!!boundary&&!problem;child.stdin.end();
+        }
+      });
+      child.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-2000);});
+      child.on('error',error=>{clearTimeout(timer);reject(error);});
+      child.on('close',(code,signal)=>{
+        clearTimeout(timer);
+        try {
+          if(ok&&boundary&&claudeId&&claudeId!==r.claudeId)resolve({claudeId,at:at??Date.now(),before:boundary.pre_tokens??null,after:boundary.post_tokens??null,usage});
+          else reject(new Error(this.idleCancelled?'cancelled':problem||stderr.trim()||`Claude Code exited (${code??signal}) without compacting.`));
+        } catch(error){reject(error);}
+      });
+      child.stdin.on('error',()=>{});
+      child.stdin.write(JSON.stringify({type:'user',uuid:randomUUID(),message:{role:'user',content:'/compact'},parent_tool_use_id:null})+'\n');
+    });
+  }
+  cancelIdle() {this.idleCancelled=true;this.idleChild?.kill('SIGTERM');}
+  // A stopped compaction exits within a second or two; nothing waits on one for long.
+  async stopIdle(reason) {
+    const job=this.idleJob;if(!job)return;
+    this.log('idle_compaction_cancelled',{reason});this.cancelIdle();
+    await Promise.race([job,new Promise(resolve=>setTimeout(resolve,IDLE_CANCEL_WAIT_MS).unref())]);
   }
   takeResult(id) {const r=this.results.get(id);this.results.delete(id);this.pending.delete(id);return r;}
   // items are every output the desktop recorded for one call, in order.
@@ -267,6 +394,9 @@ export class Session {
     this.log('tool_result',{call_id:id,...(items.length>1?{outputs:items.length}:{})});
   }
   async accept(body,res,onComplete) {
+    // The cache is warm while an idle compaction runs, so the turn resumes the
+    // full conversation and the summary is not needed.
+    await this.stopIdle('new_request');
     // A Stop and a quick resend reach the bridge while the stopped request is
     // still waiting for the previous turn's process to exit. That request ends
     // on its own once it sees the Stop, so the resend waits for it.
@@ -372,7 +502,7 @@ export class Session {
     this.turnKey=body.__bridge_turn_key;
     let fork=body.__bridge_compaction&&!this.record.started&&body.__bridge_turn_key?await this.compactionFork(originalInput,body.__bridge_turn_key):null;
     if(fork?.reason){this.log('compaction_import',{reason:fork.reason});fork=null;}
-    if(fork){this.tools=fork.tools;this.log('compaction_fork',{from:fork.from,extra_items:fork.extra.length,cold:fork.cold,stopped:fork.stopped?.reason??null});}
+    if(fork){this.tools=fork.tools;this.log('compaction_fork',{from:fork.from,extra_items:fork.extra.length,cold:fork.cold,stopped:fork.stopped?.reason??null,...(fork.idle?{idle_summary:true}:{})});}
     await this.setupMcp();
     const users=body.input.filter(isIncoming);
     const key=inputKey;
@@ -409,56 +539,39 @@ export class Session {
     // Switching Claude models between turns resumes the same native session
     // on the new model. Its first request cannot reuse the old model's cache.
     if(!fork&&(this.record.started||this.resumeItems)&&this.record.model&&this.record.model!==runModel.slug)this.log('model_switched',{from:this.record.model,to:runModel.slug});
-    const config={mcpServers:{chatgpt:{type:'http',url:`${this.bridge.url}/mcp/${this.id}`,headers:{Authorization:`Bearer ${this.bridge.token}`}}}};
     const systemFile=path.join(this.bridge.stateDir,`${this.id}.system.txt`);
     fs.writeFileSync(systemFile,fork?.prompt??prompt,{mode:0o600});
-    // The config holds the bridge token, which any local user could read from
-    // the process list if it were passed inline.
-    const mcpFile=path.join(this.bridge.stateDir,`${this.id}.mcp.json`);
-    fs.writeFileSync(mcpFile,JSON.stringify(config),{mode:0o600});
+    const mcpFile=this.writeMcpConfig();
     this.record.instructions=digest(fork?.prompt??prompt);this.record.effort=effort;this.record.model=runModel.slug;
     this.schema=outputSchema(body);
     // Claude Code 2.1.300 resumes at a given entry and drops what follows. It
     // refuses when the dropped part holds anything but the named turn, such as
     // a queued message or another turn.
     const truncate=this.truncate;this.truncate=null;
-    const args=['-p','--model',runModel.claude_model,...(effort?['--effort',effort]:[]),'--input-format','stream-json','--output-format','stream-json','--verbose','--include-partial-messages',
-      '--tools','','--strict-mcp-config','--mcp-config',mcpFile,'--allowedTools','mcp__chatgpt__*','--permission-mode','dontAsk',
-      '--setting-sources','','--disable-slash-commands','--system-prompt-snapshot','off','--system-prompt-file',systemFile,
+    // A summary written while the thread was idle replaces the conversation
+    // only once the cache it was written from has expired. Until then the
+    // full conversation costs no more to resume.
+    const idle=!fork&&this.record.idle;let summary=null;
+    if(idle) {
+      delete this.record.idle;
+      const reason=this.resumeItems||truncate||!this.record.started||idle.cacheAt!==this.record.cacheAt?'session_changed':Date.now()-idle.at<=CACHE_TTL_MS?'cache_warm':null;
+      if(reason)this.log('idle_compaction_discarded',{reason});
+      else {
+        summary=idle;this.record.claudeId=idle.claudeId;this.record.turnEnd=null;
+        this.log('idle_compaction_used',{before:idle.before,after:idle.after,idle_minutes:Math.round((Date.now()-idle.cacheAt)/60000)});
+      }
+    }
+    const args=[...claudeArgs(runModel.claude_model,effort,mcpFile,systemFile),'--include-partial-messages','--disable-slash-commands',
       ...(this.schema?['--json-schema',JSON.stringify(this.schema)]:[]),
       ...(fork?['--resume',fork.claudeId,'--fork-session']:[this.record.started||this.resumeItems?'--resume':'--session-id',this.record.claudeId]),
       ...(truncate?['--resume-session-at',truncate.at,'--resume-drops-turn',truncate.prompt]:[])];
-    const env={...process.env};
-    for(const name of Object.keys(env))if((name.startsWith('ANTHROPIC_')||name.startsWith('CLAUDE_')||name.startsWith('CODEX_'))&&!KEEP_ENV.has(name))delete env[name];
     // Once Claude Code has reported the model an alias starts, every internal
     // model choice is pinned to it, so one model does all the work.
-    const pinned=this.bridge.resolvedModels.get(runModel.slug)??(runModel.family?null:runModel.claude_model);
-    if(pinned)Object.assign(env,{ANTHROPIC_DEFAULT_FABLE_MODEL:pinned,ANTHROPIC_DEFAULT_OPUS_MODEL:pinned,ANTHROPIC_DEFAULT_SONNET_MODEL:pinned,ANTHROPIC_DEFAULT_HAIKU_MODEL:pinned,CLAUDE_CODE_SUBAGENT_MODEL:pinned});
-    Object.assign(env,{CLAUDE_CODE_DISABLE_AUTO_MEMORY:'1',DISABLE_AUTOUPDATER:'1',
-      // The desktop owns tool timeouts and yields. Claude Code's ~60 s MCP default
-      // otherwise abandons long host tools while the desktop keeps running them.
-      MCP_TOOL_TIMEOUT:'86400000',
-      // Claude Code also aborts an HTTP MCP call after 300 s without a response
-      // or progress, so a long clock.sleep or build ended the native session.
-      CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT:'0',
-      // The desktop sizes tool output for the model. Claude Code's 25k-token cap
-      // otherwise moves large results, such as browser snapshots, to a file.
-      MAX_MCP_OUTPUT_TOKENS:'200000',
-      // Code mode documents every nested tool (shell, apply_patch, web__run, apps)
-      // inside the exec description, ~355k chars. Claude Code cuts MCP
-      // descriptions at 2048 chars by default, hiding almost all of it.
-      CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH:'4000000'});
+    const env=claudeEnv(this.bridge,this.bridge.resolvedModels.get(runModel.slug)??(runModel.family?null:runModel.claude_model));
     // Nothing reads a fork's cache afterwards. Once the session's own cache
     // has expired, writing one costs twice the plain input price for the whole
     // conversation, 441k tokens in one compaction of an idle thread.
     if(fork?.cold)env.DISABLE_PROMPT_CACHING='1';
-    // Login mode runs the user's own Claude Code login. API key mode hands
-    // Claude Code the configured key, which it then uses instead of a login.
-    if(this.bridge.auth.mode==='api_key') {
-      const key=this.bridge.auth.apiKey();
-      if(!key)throw new Error('API key mode is on, but no ANTHROPIC_API_KEY is available to the bridge.');
-      env.ANTHROPIC_API_KEY=key;
-    }
     if(this.stream!==activeStream)return;
     // Claude Code carries a session's usage totals across --resume and forks,
     // so models the session ran on before are expected in them.
@@ -475,8 +588,10 @@ export class Session {
     const promptId=randomUUID();this.record.prompt=fork?null:promptId;
     // Until a response completes, the native session has seen this request's input.
     if(!fork){this.record.history=historyStamp(originalInput);this.record.historyWithoutCalls=null;}
+    Object.assign(this.record,{key:this.key,thread:body.__bridge_thread,kind:body.__bridge_compaction?'compaction':body.__bridge_kind,subagent:!!body.__bridge_subagent,structured:!!this.schema});
     this.record.delivered=[];this.record.stop=null;this.record.inflight=true;this.save();
     this.log('claude_start',{model:runModel.slug,claude_model:runModel.claude_model,resume:!!(this.record.started||this.resumeItems),effort,auth:this.bridge.auth.mode});
+    if(summary){const i=this.stream.startText();this.stream.text(i,idleNotice(summary.before,summary.after));this.stream.finishText(i,false);}
     child.stderr.on('data',chunk=>{this.stderr=(this.stderr+chunk.toString()).slice(-4000);});
     createInterface({input:child.stdout}).on('line',line=>{
       try{this.onEvent(JSON.parse(line));}catch(error){this.fail(error.message);}
@@ -571,6 +686,8 @@ export class Session {
         this.currentText=null;this.stopReason=null;if(this.ack)this.ack.thinking='';this.thoughts=new Map();
         // Only the last message of a compaction is the checkpoint.
         if(this.stream instanceof CompactionStream)this.stream.summary='';
+        // The API reads or writes the prompt cache as the request starts.
+        this.cacheAt=Date.now();
         const u=e.message.usage??{};
         this.usage.input_tokens=(u.input_tokens??0)+(u.cache_read_input_tokens??0)+(u.cache_creation_input_tokens??0);
         this.usage.input_tokens_details={cached_tokens:u.cache_read_input_tokens??0};
@@ -641,7 +758,11 @@ export class Session {
         if(msg.structured_output===undefined)throw new Error('Claude did not return the requested structured output.');
         const i=this.stream.startText();this.stream.text(i,JSON.stringify(msg.structured_output));this.stream.finishText(i,true);
       }
-      this.record.started=true;this.record.inflight=false;this.record.seen=this.pendingSeen;this.record.turnEnd=this.lastAssistant;this.save();this.log('turn_complete',{model:this.activeModel,context_window:msg.modelUsage?.[this.activeModel]?.contextWindow});
+      this.record.started=true;this.record.inflight=false;this.record.seen=this.pendingSeen;this.record.turnEnd=this.lastAssistant;
+      this.record.contextTokens=this.usage.input_tokens+this.usage.output_tokens;this.record.cacheAt=this.cacheAt??Date.now();
+      // An idle compaction runs this model again, so it reads this turn's cache.
+      this.record.activeModel=this.activeModel;this.record.nativeUsage=nativeUsage(msg.modelUsage?.[this.activeModel]);this.save();
+      this.bridge.idle?.note(this);this.log('turn_complete',{model:this.activeModel,context_window:msg.modelUsage?.[this.activeModel]?.contextWindow});
       const compacted=this.stream instanceof CompactionStream&&!!this.stream.summary.trim();
       this.completeStream();
       if(compacted)this.releaseCompactedTurn();

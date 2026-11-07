@@ -5,7 +5,7 @@ import path from 'node:path';
 import {timingSafeEqual, createHmac} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
-import {Session} from './session.mjs';
+import {Session, idleEligible} from './session.mjs';
 import {createSearchHandler, pickerSearch} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
 import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, ResponseStream} from './protocol.mjs';
@@ -60,10 +60,74 @@ export async function evictIdleSessions(bridge,now=Date.now()) {
       session.log('host_tool_abandoned',{waited_ms:now-session.lastUsed});
       session.cancel('The desktop never returned a tool result.');await session.exiting;continue;
     }
-    if(session.child||session.accepting||session.exiting||session.stream||now-session.lastUsed<300000)continue;
+    if(session.child||session.accepting||session.exiting||session.stream||session.idleJob||now-session.lastUsed<300000)continue;
     bridge.sessions.delete(key);
     await session.mcp?.close();
   }
+}
+
+// Claude Code 2.1.299 compacts a conversation of 200K tokens or more once it
+// has been idle for 90% of its one-hour cache lifetime, and uses the summary
+// on the next message only if the cache has expired by then. The bridge runs
+// each turn as its own Claude Code process, so it does the same between
+// turns. In the separate-window bridge's log from October 23 to November 6,
+// 2026, 37 turns at 200K tokens or more resumed a cold cache and wrote 11.1M
+// tokens to it again. Subagent threads and threads that moved on to a new
+// context are never compacted: 257 of 397 such idle sessions were one of those.
+export const IDLE_COMPACTION={minTokens:200000,afterMs:3240000,lateMs:3360000,maxJobs:2};
+export function idleScheduler(bridge,options={}) {
+  const idle={...IDLE_COMPACTION,...options,candidates:new Map(),threadSeen:new Map(),jobs:new Set()};
+  idle.note=session=>{
+    if(idleEligible(session.record,idle.minTokens))idle.candidates.set(session.key,{thread:session.record.thread,cacheAt:session.record.cacheAt});
+    else idle.candidates.delete(session.key);
+  };
+  // Candidates survive a restart in the session records. A thread whose newest
+  // record is another session has moved on.
+  idle.restore=(now=Date.now())=>{
+    if(!idle.minTokens)return;
+    const records=[];
+    for(const name of fs.readdirSync(bridge.stateDir)) {
+      if(!/^[0-9a-f]{64}\.json$/.test(name))continue;
+      const file=path.join(bridge.stateDir,name);
+      try{const mtime=fs.statSync(file).mtimeMs;if(now-mtime<=idle.lateMs)records.push({mtime,record:JSON.parse(fs.readFileSync(file,'utf8'))});}catch{}
+    }
+    for(const {record} of records) {
+      if(!record.key||!idleEligible(record,idle.minTokens))continue;
+      if(!records.some(other=>other.record.thread===record.thread&&other.record.key!==record.key&&other.mtime>record.cacheAt))idle.candidates.set(record.key,{thread:record.thread,cacheAt:record.cacheAt});
+    }
+  };
+  return idle;
+}
+export async function idleCompactions(bridge,now=Date.now()) {
+  const idle=bridge.idle;
+  if(!idle?.minTokens)return;
+  for(const [key,candidate] of idle.candidates) {
+    if(now<candidate.cacheAt+idle.afterMs)continue;
+    if(idle.jobs.size>=idle.maxJobs)break;
+    idle.candidates.delete(key);
+    const skip=reason=>bridge.log('idle_compaction_skipped',{session:digest(key).slice(0,12),reason});
+    // The Mac slept or the bridge was down past the point where a compaction
+    // would still find the cache warm.
+    if(now-candidate.cacheAt>idle.lateMs){skip('lapsed');continue;}
+    if((idle.threadSeen.get(candidate.thread)??0)>candidate.cacheAt){skip('thread_moved_on');continue;}
+    let session=bridge.sessions.get(key);
+    if(!session){session=new Session(bridge,key);bridge.sessions.set(key,session);}
+    const job=session.idleCompact(candidate).catch(error=>session.log('idle_compaction_failed',{message:error.message})).finally(()=>idle.jobs.delete(job));
+    idle.jobs.add(job);
+  }
+  // Only a candidate from the last lateMs can still fire.
+  for(const [thread,at] of idle.threadSeen)if(now-at>idle.lateMs)idle.threadSeen.delete(thread);
+}
+
+// The runtime's optional settings.json: {"idleCompaction": false} turns idle
+// compaction off, as in Claude Code, and "idleCompactMinTokens" moves its
+// threshold, to no less than 100K. The bridge reads it at start.
+export function idleSettings(file) {
+  let settings;
+  try{settings=JSON.parse(fs.readFileSync(file,'utf8'));}
+  catch(error){if(error.code!=='ENOENT')process.stderr.write(`settings.json ignored: ${error.message}\n`);return {};}
+  if(!settings||typeof settings!=='object')return {};
+  return settings.idleCompaction===false?{minTokens:0}:Number.isFinite(settings.idleCompactMinTokens)?{minTokens:Math.max(100000,settings.idleCompactMinTokens)}:{};
 }
 
 export function pruneResponseCache(directory,now=Date.now()) {
@@ -85,7 +149,7 @@ export function pruneToolSets(directory,now=Date.now()) {
 // reads Claude Code's credentials.
 // gatewayKey turns on picker mode, where the app's own OpenAI provider is
 // pointed at /g/<gatewayKey>/backend-api/codex (see gateway.mjs).
-export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000,exitGraceMs=15000,initWaitMs=10000}) {
+export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000,exitGraceMs=15000,initWaitMs=10000,idleCompaction={}}) {
   if(!AUTH_MODES.includes(auth?.mode))throw new Error(`Unknown auth mode ${auth?.mode}. Use one of: ${AUTH_MODES.join(', ')}.`);
   if(auth.mode==='api_key'&&typeof auth.apiKey!=='function')throw new Error('API key mode needs an apiKey function.');
   // Claude Code runs in claudeCwd and is handed files under stateDir, so a
@@ -118,7 +182,9 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   // with an install hint. The service passes the path it found at startup.
   let claudePath=claude;
   Object.defineProperty(bridge,'claude',{get:()=>claudePath??=findClaude()});
-  const sessionTimer=setInterval(()=>evictIdleSessions(bridge).catch(error=>log('session_cleanup_error',{message:error.message})),60000);sessionTimer.unref();
+  bridge.idle=idleScheduler(bridge,idleCompaction);
+  try{bridge.idle.restore();}catch(error){log('idle_restore_error',{message:error.message});}
+  const sessionTimer=setInterval(()=>evictIdleSessions(bridge).then(()=>idleCompactions(bridge)).catch(error=>log('session_cleanup_error',{message:error.message})),60000);sessionTimer.unref();
   // The desktop retains its ordinary account Authorization header. Authenticate
   // the local hop separately. Only standalone search forwards desktop auth,
   // directly to OpenAI; model inference and Claude never receive that token.
@@ -182,14 +248,17 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         ?checkpointText(x.encrypted_content,token)
         :'<context_checkpoint>Earlier conversation was compacted by another model. Its summary is encrypted for that model and is not available here; the messages kept after it follow. Ask the user if something important is missing.</context_checkpoint>'}]})};
     if(kind==='compaction') {body.__bridge_compaction=true;body.tools=[];body.__bridge_turn_key=[thread,metadata.context_window_id??'default','turn',checkpointKey].join(':');}
-    body.__bridge_model=model;
+    body.__bridge_model=model;body.__bridge_thread=thread;body.__bridge_kind=kind;
+    // The app marks requests from a subagent's thread, which is rarely resumed once its work is done.
+    body.__bridge_subagent=!!(req.headers['x-openai-subagent']||req.headers['x-codex-parent-thread-id']);
+    bridge.idle.threadSeen.set(thread,Date.now());
     // Kept in memory with the request only, never written to disk.
     if(searching&&kind!=='compaction')body.__bridge_search={...searching,thread,model:body.model};
     // The app's provider retries a failure it reads as transient, which would
     // run the turn again; the bridge marks its failures as final.
     if(req.appProvider)body.__bridge_final_errors=true;
     const key=[thread,metadata.context_window_id??'default',kind,checkpointKey].join(':');
-    bridge.log('request',{model:model.slug,request_kind:kind,picker:req.gateway??false,app_provider:!!req.appProvider,window:metadata.window_number,tools:body.tools?.length,items:body.input.length});
+    bridge.log('request',{model:model.slug,request_kind:kind,picker:req.gateway??false,app_provider:!!req.appProvider,window:metadata.window_number,tools:body.tools?.length,items:body.input.length,...(body.__bridge_subagent?{subagent:true}:{})});
     if(!bridge.sessions.has(key))bridge.sessions.set(key,new Session(bridge,key));
     await bridge.sessions.get(key).accept(body,res,frames=>{
       try{const temp=cacheFile+'.tmp';fs.writeFileSync(temp,sealCheckpoint(frames,token),{mode:0o600});fs.renameSync(temp,cacheFile);}
@@ -223,7 +292,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         url.pathname=rest;req.appProvider=true;
       } else if(!authenticated(req))return json(res,401,{error:{message:'Bridge authentication required.'}});
       if(url.pathname==='/health')return json(res,200,{status:'ok',version:VERSION,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway,app_provider:true,sessions:bridge.sessions.size,
-        active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length,active_relays:gateway?.active()??0});
+        active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length,active_relays:gateway?.active()??0,idle_compactions:bridge.idle.jobs.size});
       if(url.pathname==='/v1/models')return json(res,200,{object:'list',data:models.list.map(m=>({id:m.slug,object:'model',owned_by:'anthropic',display_name:bridge.label(m)}))});
       if(req.method==='POST'&&url.pathname==='/v1/alpha/search') {
         if(!bridge.webSearch)return json(res,404,{error:{message:'Web search is turned off for this bridge. Run setup again with --web-search to turn it on.'}});
@@ -296,7 +365,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});
   bridge.url=`http://127.0.0.1:${server.address().port}`;
   // A session stopped before Claude Code's init waits for it, so all are stopped before any is awaited.
-  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();const all=[...bridge.sessions.values()];for(const s of all){if(s.stream?.final&&!s.stream.finished)s.stream.fail(RESTARTED_MID_REPLY);s.cancel('Bridge shutting down.');}for(const s of all){await s.exiting;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
+  bridge.close=async()=>{clearInterval(cacheTimer);clearInterval(sessionTimer);gateway?.close();const all=[...bridge.sessions.values()];for(const s of all){if(s.stream?.final&&!s.stream.finished)s.stream.fail(RESTARTED_MID_REPLY);s.cancel('Bridge shutting down.');s.cancelIdle();}for(const s of all){await s.exiting;await s.idleJob;await s.mcp?.close();}server.closeAllConnections();await new Promise(r=>server.close(r));};
   log('bridge_ready',{url:bridge.url,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway});return bridge;
 }
 
@@ -311,7 +380,7 @@ if(process.argv[1]===fileURLToPath(import.meta.url)) {
   const keyFile=path.join(runtime,'gateway-key');
   const gatewayKey=fs.existsSync(keyFile)?fs.readFileSync(keyFile,'utf8').trim():null;
   const bridge=await startBridge({stateDir:path.join(runtime,'sessions'),token,port:Number(process.env.CLAUDE_BRIDGE_PORT??DEFAULT_PORT),claude:findClaude(),auth,
-    webSearch:process.env.CLAUDE_BRIDGE_WEB_SEARCH==='1',gatewayKey,gatewayUpstream:process.env.CLAUDE_BRIDGE_GATEWAY_UPSTREAM||GATEWAY_UPSTREAM,
+    webSearch:process.env.CLAUDE_BRIDGE_WEB_SEARCH==='1',gatewayKey,gatewayUpstream:process.env.CLAUDE_BRIDGE_GATEWAY_UPSTREAM||GATEWAY_UPSTREAM,idleCompaction:idleSettings(path.join(runtime,'settings.json')),
     log:(event,data)=>process.stdout.write(JSON.stringify({time:new Date().toISOString(),event,...data})+'\n')});
   fs.writeFileSync(path.join(runtime,'bridge.pid'),String(process.pid),{mode:0o600});
   for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>bridge.close().then(()=>process.exit(0)));
