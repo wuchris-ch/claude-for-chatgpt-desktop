@@ -3,7 +3,7 @@
 // random port with a temporary state folder. Each scenario sends a few short,
 // low-effort requests and uses your normal claude login (or ANTHROPIC_API_KEY
 // with CLAUDE_BRIDGE_AUTH=api_key).
-//   node e2e/live.mjs [models|tools|steer|narration|image|switch|stop|compact|midturn|time|resample|visualize|toolwait|resume|idle ...]
+//   node e2e/live.mjs [models|tools|steer|narration|image|switch|stop|compact|midturn|time|resample|visualize|toolwait|resume|idle|answer ...]
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -288,6 +288,37 @@ const scenarios={
       try{for(const d of fs.readdirSync(claudeProjects()))if(d.includes(path.basename(rdir)))fs.rmSync(path.join(claudeProjects(),d),{recursive:true,force:true});}catch{}
       fs.rmSync(rdir,{recursive:true,force:true});
     }
+  },
+  async answer() {
+    // A follow-up in an automation thread. The app's automation prompt asks
+    // for a memory update before the closing inbox directive, and the app
+    // folds every message before the final answer when the turn ends.
+    const shell=[{type:'function',name:'shell',description:'Runs a zsh command on the host and returns its output.',parameters:{type:'object',properties:{cmd:{type:'string'}},required:['cmd']}}];
+    const automation='Response MUST end with a remark-directive block.\n\n## Responding\n\n- Answer the user normally and concisely. Explain what you found, what you did, and what the user should focus on now.\n- Automations: use the memory file at `$CODEX_HOME/automations/<automation_id>/memory.md` (create it if missing).\n  - Read it first (if present) to avoid repeating recent work.\n  - Before returning the directive, write a concise summary of what you did/decided plus the current run time.\n  - Use the `Automation ID:` value provided in the message to locate/update this file.\n- REQUIRED: End with a valid remark-directive block on its own line (not inline).\n  - Always include an inbox item directive:\n    `::inbox-item{title="Sample title" summary="Place description here"}`';
+    const rules='# AGENTS.md instructions for /Users/me/reports\n\n<INSTRUCTIONS>\n- For work with several parts, start with a short plan of the parts in order.\n- While you work, tell me what you find as you find it, in two to four plain sentences before your next step. The final answer still gives the full summary.\n</INSTRUCTIONS>';
+    const writes=cmd=>/memory\.md/.test(cmd)&&/>|tee|printf|cat <</.test(cmd);
+    const reply=cmd=>/memory\.md/.test(cmd)?'# Weekly report health check: memory\n\n## Run 2026-11-08\nFound three risks: address lookup gap, blocked by-law sites (Vaughan, Ottawa), release script second-host failure.':
+      /lookup|address|gis/i.test(cmd)?'src/runner.mjs:212: if (lookup.failed && job.kind === "letter") return review(job);\nsrc/runner.mjs:213: // map reports continue without a located lot':
+      /alarm|cloudwatch/i.test(cmd)?'submit-queue-oldest-message: threshold 600 s, action ops-alerts\ndead-letter-not-empty: action ops-alerts':
+      /release|deploy|install/i.test(cmd)?'scripts/release.sh: installs host A, then host B; if host B fails it exits 1 and leaves host A on the new release':
+      /bylaw|by-law|vaughan|ottawa/i.test(cmd)?'vaughan.ca: 403 for automated reads (14 jobs in 30 days)\nottawa.ca: 403 for automated reads (18 jobs in 30 days)':
+      /^\s*(ls|find|tree)\b/.test(cmd)?'README.md\ninfra/alarms.tf\nscripts/release.sh\nsrc/lookup.mjs\nsrc/runner.mjs':
+      'README.md: Report workers. Jobs come from the submit queue; each runs lookup, then the report writer. Two hosts run the workers.';
+    let input=[{type:'message',role:'developer',content:[{type:'input_text',text:automation}]},user(rules,'u0'),
+      user('Automation: Weekly report health check\nAutomation ID: weekly-report-check\nAutomation memory: $CODEX_HOME/automations/weekly-report-check/memory.md\nLast run: never\n\nCheck the report workers in ~/reports for anything that could send a customer a wrong or empty report.','u1'),
+      {type:'message',role:'assistant',phase:'final_answer',content:[{type:'output_text',text:'Three paths can go wrong: the address lookup can fail and a map report still goes out with no lot; two city by-law sites block automated reads; and the release script does not handle a failed install on the second host. Alarms already cover a stuck queue and dead letters.\n\n::inbox-item{title="Three report risks found" summary="Address lookup gap, blocked by-law sites, release script"}'}]},
+      user('well anything u recommend? i dont want embarassing moments because we didnt do further engineering but also dont want to overengineer','u2')];
+    const shown=[];let memory=false;
+    for(let step=0;step<14;step++) {
+      const r=await done(await post('live-answer',{...base('claude-opus',shell),instructions:'',reasoning:{effort:'xhigh'},input}));
+      for(const x of r.output)if(x.type==='message')shown.push({phase:x.phase,text:x.content.map(c=>c.text).join('')});
+      input=[...input,...r.output];
+      const calls=r.output.filter(x=>x.type==='function_call');if(!calls.length)break;
+      for(const call of calls){const cmd=JSON.parse(call.arguments).cmd??'';memory||=writes(cmd);input.push({type:'function_call_output',call_id:call.call_id,output:writes(cmd)?'':reply(cmd)});}
+    }
+    const final=shown.at(-1),longest=Math.max(0,...shown.slice(0,-1).map(x=>x.text.length));
+    check('memory update in an automation follow-up',memory,`${shown.length-1} commentary messages before the answer`);
+    check('the answer after the last tool call is complete',final?.phase==='final_answer'&&final.text.length>=600&&final.text.length>=longest&&/::inbox-item\{/.test(final.text),`answer ${final?.text.length} characters, longest commentary ${longest}: "${final?.text.replace(/\s+/g,' ').slice(0,100)}…"`);
   },
   async idle() {
     // A turn with a tool call over a 25K-token stock list on Opus at xhigh

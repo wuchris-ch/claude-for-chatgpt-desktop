@@ -334,7 +334,14 @@ const TOOL_HABITS_NOTE='To read a PDF, render its pages to images in a new tempo
 const SCHEDULE_NOTE='The desktop scheduler reads BYHOUR in yearly and monthly automation rules as UTC (daily and weekly rules use local time), and runs a heartbeat again after it fires even with COUNT=1. Start the prompt of a one-time heartbeat with deleting the automation named in the heartbeat\'s automation_id. Within the next seven days, write it as FREQ=WEEKLY with BYDAY and the local BYHOUR and BYMINUTE; for a later date, as a yearly rule with the month, day, hour and minute converted to UTC at the offset in effect on that date. A recurring monthly rule needs its hour in UTC too.';
 const scheduleNote=(body,exec)=>nestedTools(exec).some(n=>n.endsWith('automation_update'))||(body.tools??[]).some(t=>String(t.name??'').endsWith('automation_update'))?SCHEDULE_NOTE:'';
 const DEVELOPER_NOTE='Text inside <developer_message> tags in a user turn is a note from the host desktop with the authority of developer instructions. The user did not write it.';
-const COMMON_NOTE='Do not simulate tool calls in text. Text before a tool call is progress commentary; text ending the turn is your answer. Preserve the user’s instructions and use only the tools provided.';
+// The app shows text before a tool call as progress commentary and the text
+// that ends a turn as the answer. When the turn ends it folds all commentary
+// under "Worked for", so an answer written before a last tool call is hidden.
+// On November 8, 2026 Opus wrote 2,677 characters of recommendations, then the
+// memory update the app's automation prompt asks for before its inbox
+// directive, and the visible answer was one line. openai/codex#23221 reports
+// the same with GPT.
+const COMMON_NOTE='Do not simulate tool calls in text. Text before a tool call is progress commentary; text ending the turn is your answer. When the turn ends, the desktop folds all commentary out of view and shows only the answer, so make closing tool calls, such as memory or note updates, before you write the answer, and make the answer complete on its own. Preserve the user’s instructions and use only the tools provided.';
 // Code mode documents these only inside exec. Opus still called some of them
 // at the top level (12 of 269 sessions), got "No such tool" and had to write
 // the whole payload again, once a 15K-character file costing 54 s.
