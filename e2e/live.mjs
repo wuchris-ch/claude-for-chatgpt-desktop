@@ -139,6 +139,12 @@ const scenarios={
     const r=await done(await post('live-switch',{...base('claude-sonnet'),input:[...first.input,...a.output,user('What was the code word? One word.','u2')]}));
     const later=logs.slice(n),start=later.find(x=>x.event==='claude_start');
     check('switch opus to sonnet',/HERON/i.test(say(r.output))&&start?.resume===true&&later.some(x=>x.event==='model_switched'),`"${say(r.output)}" from ${later.find(x=>x.event==='turn_complete')?.model}, native session resumed: ${start?.resume}`);
+    // On Fable 5.2 a changed system prompt invalidates earlier thinking; Claude Code drops it instead of failing.
+    const thinking={...base('claude-opus'),reasoning:{effort:'high'},input:[user('A train leaves at 3:47 PM and the trip takes 2 hours 38 minutes. Remember the arrival time and reply with only it.','u1')]};
+    const c=await done(await post('live-switch-fable',thinking));await settle();const m=logs.length;
+    const f=await done(await post('live-switch-fable',{...thinking,model:'claude-fable',input:[...thinking.input,...c.output,user('Add 1 hour 25 minutes to that arrival time. Reply with only the time.','u2')]}));
+    const fable=logs.slice(m);
+    check('switch opus to fable',/7:50/.test(say(f.output))&&fable.find(x=>x.event==='claude_start')?.resume===true,`"${say(f.output)}" from ${fable.find(x=>x.event==='turn_complete')?.model}`);
   },
   async stop() {
     const first={...base('claude-opus'),input:[user('Write a 200-word story about a lighthouse keeper named Ada.','u1')]};

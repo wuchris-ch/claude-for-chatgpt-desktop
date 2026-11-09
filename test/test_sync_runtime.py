@@ -157,7 +157,7 @@ class PluginIsolationTests(unittest.TestCase):
         self.assertEqual([m['priority'] for m in models.values()],[1,2,3,4])
         self.assertTrue(haiku['model_messages']['instructions_template'].startswith('You are Claude Haiku 5.5, running as the main assistant in ChatGPT Desktop.'))
         self.assertTrue(haiku['model_messages']['instructions_template'].endswith('\nBe helpful.'))
-        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5'])
+        self.assertEqual([m['display_name'] for m in models.values()],['Claude Fable 5.2','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5'])
 
     def test_a_model_without_efforts_gets_one_fixed_level(self):
         template={'slug':'gpt-fixture','tool_mode':'code_mode_only','priority':7,'input_modalities':['text','image'],'model_messages':{'instructions_template':'You are Codex, a coding agent.\nRules.'},'service_tiers':['flex']}
@@ -175,7 +175,7 @@ class PluginIsolationTests(unittest.TestCase):
         self.assertTrue(models['claude-fable']['model_messages']['instructions_template'].startswith('You are Claude Fable 5.5, running'))
         (state/'started-models.json').write_text('not json')
         refresh_capabilities(self.source,self.codex)
-        self.assertEqual(json.loads((self.codex/'models.json').read_text())['models'][0]['display_name'],'Claude Fable 5.1')
+        self.assertEqual(json.loads((self.codex/'models.json').read_text())['models'][0]['display_name'],'Claude Fable 5.2')
 
     def test_missing_model_list_explains_what_to_do(self):
         (self.source/'models_cache.json').unlink()

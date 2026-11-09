@@ -5,7 +5,7 @@
     {
       "slug": "claude-fable",
       "claude_model": "fable",
-      "display_name": "Claude Fable 5.1",
+      "display_name": "Claude Fable 5.2",
       "description": "Latest Claude Fable through Claude Code. Most capable, for ambitious long-running work.",
       "efforts": [
         "low",

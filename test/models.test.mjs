@@ -11,7 +11,7 @@ test('the shipped catalog offers Fable, Opus, Sonnet and Haiku through Claude Co
  const models=loadModels();
  assert.equal(models.default,'claude-opus');
  assert.deepEqual(models.list.map(m=>[m.slug,m.claude_model,m.display_name,m.default_effort,m.context_window]),[
-  ['claude-fable','fable','Claude Fable 5.1','high',1000000],
+  ['claude-fable','fable','Claude Fable 5.2','high',1000000],
   ['claude-opus','opus','Claude Opus 5.5','medium',1000000],
   ['claude-sonnet','sonnet','Claude Sonnet 5.5','medium',1000000],
   ['claude-haiku','haiku','Claude Haiku 5.5','medium',1000000]]);
@@ -57,7 +57,7 @@ test('an alias entry is named after the version Claude Code started; a pinned en
  const pinned=parseModels({models:[entry({claude_model:'claude-opus-5-5',display_name:'My Opus'})]}).get('m');
  assert.equal(labelFor(pinned,'claude-opus-5-5'),'My Opus');
  const models=loadModels();
- assert.deepEqual(labeled(models,new Map([['claude-opus','claude-opus-5-6']])).list.map(m=>m.display_name),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
+ assert.deepEqual(labeled(models,new Map([['claude-opus','claude-opus-5-6']])).list.map(m=>m.display_name),['Claude Fable 5.2','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
  assert.equal(models.get('claude-opus').display_name,'Claude Opus 5.5');
 });
 test('effort defaults per model, and models without effort take none',()=>{

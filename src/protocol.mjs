@@ -407,8 +407,12 @@ export function systemPrompt(body, {name, webSearch = false}) {
   // In picker mode a thread that starts on GPT keeps GPT's base prompt, which
   // opens "You are Codex, an agent based on GPT-6.", for the whole thread; the
   // desktop names a later model only in a <model_switch> note in the history.
+  // A thread that starts on Claude keeps that model's name in the same way,
+  // after a switch to another Claude model and after an alias moves to a new
+  // release, such as Fable 5.1 to Fable 5.2. The line names the model that runs.
   const desktop = [body.instructions ?? '', ...developers.map(x => contentBlocks(x.content).map(x => x.text).join('\n'))]
-    .filter(x => x.trim()).join('\n\n').replace(/^You are Codex\b[^\n]*/, () => identity(name)).replaceAll('As Codex, you are', 'You are');
+    .filter(x => x.trim()).join('\n\n').replace(/^You are Codex\b[^\n]*/, () => identity(name)).replaceAll('As Codex, you are', 'You are')
+    .replace(/You are Claude [^,\n]{1,40}, running as the main assistant in ChatGPT Desktop\./g, () => `You are ${name}, running as the main assistant in ChatGPT Desktop.`);
   return [desktop,
     [`You are ${name}, the main assistant. The chatgpt MCP tools are the tools of the host desktop runtime. Use their native schemas. The host executes them and applies its permissions.`, tools, 'image_gen is not available to Claude.', CWD_NOTE, HOST_POLICY_NOTE, TOOL_HABITS_NOTE, scheduleNote(body,exec), COMMON_NOTE, DEVELOPER_NOTE].filter(Boolean).join(' ')].filter(Boolean).join('\n\n');
 }

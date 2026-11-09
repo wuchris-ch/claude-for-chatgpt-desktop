@@ -9,7 +9,7 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 const arg=name=>process.argv[process.argv.indexOf(name)+1];
 // Like Claude Code, an alias resolves through the ANTHROPIC_DEFAULT_*_MODEL
 // pins or its built-in table. FAKE_CLAUDE_MODEL simulates a substituted model.
-const ALIASES={fable:'claude-fable-5-1',opus:'claude-opus-5-5',sonnet:'claude-sonnet-5-5',haiku:'claude-haiku-5-5'};
+const ALIASES={fable:'claude-fable-5-2',opus:'claude-opus-5-5',sonnet:'claude-sonnet-5-5',haiku:'claude-haiku-5-5'};
 const PINS={fable:process.env.ANTHROPIC_DEFAULT_FABLE_MODEL,opus:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL,sonnet:process.env.ANTHROPIC_DEFAULT_SONNET_MODEL,haiku:process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL};
 const requested=arg('--model');
 const model=process.env.FAKE_CLAUDE_MODEL||PINS[requested]||ALIASES[requested]||requested;

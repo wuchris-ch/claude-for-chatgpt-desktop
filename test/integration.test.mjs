@@ -597,7 +597,7 @@ test('unknown auth modes are refused at startup',async()=>{
 test('each catalog model starts Claude Code with its own model, effort and name; a model without efforts gets no effort flag',async t=>{
  const {post,logs}=await setup(t);
  const fable=await probe(post,'model-probe',{model:'claude-fable'},'t-fable');
- assert.deepEqual([fable.requested,fable.model,fable.effort,fable.identity],['fable','claude-fable-5-1','high','Claude Fable 5.1']);
+ assert.deepEqual([fable.requested,fable.model,fable.effort,fable.identity],['fable','claude-fable-5-2','high','Claude Fable 5.2']);
  const opus=await probe(post,'model-probe',{},'t-opus');
  assert.deepEqual({requested:opus.requested,model:opus.model,effort:opus.effort,identity:opus.identity,webSearch:opus.webSearch},{requested:'opus',model:'claude-opus-5-5',effort:'medium',identity:'Claude Opus 5.5',webSearch:false});
  const sonnet=await probe(post,'model-probe',{model:'claude-sonnet',reasoning:{effort:'high'}},'t-sonnet');
@@ -605,7 +605,7 @@ test('each catalog model starts Claude Code with its own model, effort and name;
  const haiku=await probe(post,'model-probe',{model:'claude-haiku',reasoning:{effort:'medium'}},'t-haiku');
  assert.deepEqual([haiku.requested,haiku.model,haiku.effort,haiku.identity],['haiku','claude-haiku-5-5','medium','Claude Haiku 5.5']);
  assert.deepEqual(logs.filter(x=>x.event==='claude_start').map(x=>[x.model,x.claude_model,x.effort]),[['claude-fable','fable','high'],['claude-opus','opus','medium'],['claude-sonnet','sonnet','high'],['claude-haiku','haiku','medium']]);
- assert.deepEqual(logs.filter(x=>x.event==='turn_complete').map(x=>x.model),['claude-fable-5-1','claude-opus-5-5','claude-sonnet-5-5','claude-haiku-5-5']);
+ assert.deepEqual(logs.filter(x=>x.event==='turn_complete').map(x=>x.model),['claude-fable-5-2','claude-opus-5-5','claude-sonnet-5-5','claude-haiku-5-5']);
  const fixed=await setup(t,{models:parseModels({models:[{slug:'haiku-4-5',claude_model:'claude-haiku-4-5-20251001',display_name:'Claude Haiku 4.5',efforts:[],context_window:200000}]})});
  const old=await probe(fixed.post,'model-probe',{model:'haiku-4-5',reasoning:{effort:'medium'}},'t-haiku-4-5');
  assert.deepEqual([old.model,old.effort,old.identity],['claude-haiku-4-5-20251001',null,'Claude Haiku 4.5']);
@@ -640,16 +640,16 @@ test('a new version from an alias renames its entry, and the name survives a res
  withEnv(t,{FAKE_CLAUDE_MODEL:'claude-opus-5-6'});
  const {b,dir,post}=await setup(t);
  const names=async bridge=>(await(await fetch(bridge.url+'/v1/models',{headers:{Authorization:'Bearer fixture-secret'}})).json()).data.map(m=>m.display_name);
- assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5']);
+ assert.deepEqual(await names(b),['Claude Fable 5.2','Claude Opus 5.5','Claude Sonnet 5.5','Claude Haiku 5.5']);
  const first=await probe(post,'model-probe',{},'t-new');
  assert.equal(first.identity,'Claude Opus 5.5');
- assert.deepEqual(await names(b),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
+ assert.deepEqual(await names(b),['Claude Fable 5.2','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
  assert.equal((await probe(post,'model-probe',{},'t-next')).identity,'Claude Opus 5.6');
  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir,'started-models.json'),'utf8')),{'claude-opus':'claude-opus-5-6'});
  await b.close();
  const again=await startBridge({stateDir:dir,token:'fixture-secret',port:0,claude:fixture});
  t.after(()=>again.close());
- assert.deepEqual(await names(again),['Claude Fable 5.1','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
+ assert.deepEqual(await names(again),['Claude Fable 5.2','Claude Opus 5.6','Claude Sonnet 5.5','Claude Haiku 5.5']);
  assert.equal(again.resolvedModels.size,0);
  const restarted=await probe((body,extra)=>fetch(again.url+'/v1/responses',{method:'POST',body:JSON.stringify(body),...extra}),'model-probe',{},'t-restart');
  assert.deepEqual([restarted.identity,restarted.pins.opus],['Claude Opus 5.6',null]);
@@ -684,7 +684,7 @@ test('a compaction fork keeps the session model even when the desktop asks with 
 });
 test('the models endpoint and health check list the catalog, auth mode and search setting',async t=>{
  const {b}=await setup(t);const get=p=>fetch(b.url+p,{headers:{Authorization:'Bearer fixture-secret'}}).then(r=>r.json());
- assert.deepEqual((await get('/v1/models')).data.map(m=>[m.id,m.display_name]),[['claude-fable','Claude Fable 5.1'],['claude-opus','Claude Opus 5.5'],['claude-sonnet','Claude Sonnet 5.5'],['claude-haiku','Claude Haiku 5.5']]);
+ assert.deepEqual((await get('/v1/models')).data.map(m=>[m.id,m.display_name]),[['claude-fable','Claude Fable 5.2'],['claude-opus','Claude Opus 5.5'],['claude-sonnet','Claude Sonnet 5.5'],['claude-haiku','Claude Haiku 5.5']]);
  const health=await get('/health');
  assert.deepEqual([health.models,health.auth,health.web_search],[['claude-fable','claude-opus','claude-sonnet','claude-haiku'],'claude_login',false]);
 });

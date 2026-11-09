@@ -53,3 +53,10 @@ test('a thread that started on GPT gives Claude its own identity, not the Codex 
  const own='You are Claude Opus 5.5, running as the main assistant in ChatGPT Desktop. Rules.';
  assert.ok(systemPrompt({input:[{type:'message',role:'developer',content:own},{type:'message',role:'user',content:'hi'}]},{name:'Claude Opus 5.5'}).startsWith(own));
 });
+test('a thread that started on another Claude model, or on an older release of its alias, names the model that runs',()=>{
+ const own=name=>`You are ${name}, running as the main assistant in ChatGPT Desktop. Rules.`;
+ const prompt=(base,name)=>systemPrompt({input:[{type:'message',role:'developer',content:base},{type:'message',role:'user',content:'hi'}]},{name});
+ assert.ok(prompt(own('Claude Fable 5.1'),'Claude Fable 5.2').startsWith(own('Claude Fable 5.2')));
+ assert.ok(prompt(own('Claude Opus 5.5'),'Claude Sonnet 5.5').startsWith(own('Claude Sonnet 5.5')));
+ assert.doesNotMatch(prompt(own('Claude Opus 5.5'),'Claude Sonnet 5.5'),/Opus/);
+});

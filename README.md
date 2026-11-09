@@ -107,7 +107,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 
 ## Limits
 
-- **macOS only.** Tested with ChatGPT 26.1027.61615 (Codex runtime 0.166.0-alpha.5.1), Claude Code 2.1.317 and Node.js 24.21. A later app or Claude Code release can need an update here.
+- **macOS only.** Tested with ChatGPT 26.1027.61615 (Codex runtime 0.166.0-alpha.5.1), Claude Code 2.1.321 and Node.js 24.21. A later app or Claude Code release can need an update here.
 - **Local tasks only.** Cloud tasks, image generation and other OpenAI-hosted features stay with GPT. Voice conversations run on OpenAI's voice model, which hands tasks to the selected Claude model. Other tools that run on OpenAI's servers are left out of Claude's tools.
 - **GPT goes through the bridge in picker mode.** If the service stops, GPT requests fail until macOS restarts it or you uninstall. The setting is in the shared `~/.codex/config.toml`, so the Codex CLI and IDE extension also go through the bridge. The uninstall command works even when the service or its folder is gone. Picker mode needs a ChatGPT sign-in, doesn't use proxy settings, and isn't meant for ChatGPT workspaces with data-residency routing.
 - **GPT's summaries are encrypted for GPT.** If a chat that GPT compacted switches to Claude, Claude gets the messages after the summary and a note that it's unavailable.
@@ -213,8 +213,9 @@ Reopen ChatGPT after either change.
 [claude-models.json](claude-models.json) lists the picker entries.
 
 - Each `claude_model` is passed to `claude --model`.
-- The aliases `fable`, `opus`, `sonnet` and `haiku` follow Claude Code to new releases. On October 9, 2026 they started `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`.
-- An alias entry is named after the version Claude Code last started for it, so Claude Fable 5.1 becomes Claude Fable 5.5 after the first chat on the new release.
+- The aliases `fable`, `opus`, `sonnet` and `haiku` follow Claude Code to new releases. With Claude Code 2.1.321, on November 9, 2026, they started `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5` and `claude-haiku-5-5`. Earlier Claude Code releases start Fable 5.1 for `fable`.
+- An alias entry is named after the version Claude Code last started for it, so Claude Fable 5.1 becomes Claude Fable 5.2 after the first chat on the new release.
+- A chat keeps the model name it started with in its first prompt line, after a switch to another Claude model or a new release. The bridge writes the name of the model that runs into that line.
 - The bridge checks the model Claude Code actually starts. An alias accepts any version of its family; a full model id must match exactly.
 
 To pin a version or add a model, copy the file, edit it, and pass it to setup:
@@ -344,7 +345,7 @@ A chat where Claude answered may not continue on GPT once the bridge is removed,
 
 ```sh
 npm test               # 300 tests with stand-ins for Claude Code and OpenAI
-node e2e/live.mjs      # 32 short checks with real Claude Code
+node e2e/live.mjs      # 33 short checks with real Claude Code
 node e2e/app-runtime.mjs   # the app's own runtime against this bridge, with a placeholder login
 ```
 
