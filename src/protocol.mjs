@@ -298,7 +298,7 @@ export function stoppedTurnNote(items, {reason, sent = 0, status}) {
 export const resampledSteer = (items, reason) => reason === 'Desktop cancelled or disconnected.' && items.some(isIncoming) && !items.some(isCallResult) && !userStopped(items);
 export function resumeAfterStop(items, {reason, sent = 0, status}, {more = false} = {}) {
   if (resampledSteer(items, reason)) {
-    const parts = ['The desktop restarted your response to deliver the message below, which the user sent while you were working. The user did not stop you: Claude Code marked the response as interrupted by the user because of this restart.'];
+    const parts = ['The desktop restarted your response to deliver the message below, which the user sent while you were working. The user did not stop you: Claude Code marked the response as interrupted by the user because of this restart, and wrote any "No response requested." reply for the same reason. You did not send that reply, and the user did not see it.'];
     if (sent) parts.push('A tool call shown as rejected had already reached the host, which may have run it in part or in full. Check its effects before relying on it or running it again.');
     parts.push('Carry on with the task, taking the message into account.');
     return [{type: 'text', text: `<turn_stopped>${parts.join(' ')}</turn_stopped>`}, ...steeringPrompt(items)];

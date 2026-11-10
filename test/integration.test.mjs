@@ -848,21 +848,77 @@ test('an API error after a tool result and a queued message resumes without send
  assert.equal(logs.filter(x=>x.event==='tool_call').length,2);
  assert.deepEqual(rebuilt(logs),[]);
 });
+const aborted={type:'message',role:'developer',content:[{type:'input_text',text:'<turn_aborted>The user interrupted the previous turn.</turn_aborted>'}]};
+// Posts a request and cancels it once its Claude Code process has started.
+async function stopAtInit(post,body,logs) {
+ const count=event=>logs.filter(x=>x.event===event).length;const starts=count('claude_start');
+ const abort=new AbortController();const pending=post(body,{signal:abort.signal}).then(r=>r.text()).catch(()=>{});
+ await waitUntil(()=>count('claude_start')>starts);abort.abort();await pending;
+ await waitUntil(()=>count('claude_exit')===count('claude_start'));
+}
 test('a Stop before Claude Code reports init stops it at init, so the message is recorded once and the turn resumes',async t=>{
  const {post,logs,dir}=await setup(t);const first=request('hello');
  const a=output(await(await post(first)).text());
  const slow={...first,input:[...first.input,...a,...request('slow-init-400 second question','user2').input]};
- const abort=new AbortController();const pending=post(slow,{signal:abort.signal}).then(r=>r.text()).catch(()=>{});
- await waitUntil(()=>logs.filter(x=>x.event==='claude_start').length===2);abort.abort();await pending;
- await waitUntil(()=>logs.filter(x=>x.event==='claude_exit').length===2);
+ await stopAtInit(post,slow,logs);
  assert.ok(logs.some(x=>x.event==='stopped_at_init'));
- // The user sends another message right away.
- const report=resumed(output(await(await post({...slow,input:[...slow.input,...request('and a third','user3').input]})).text()));
+ // The user stops the turn and sends another message right away.
+ const report=resumed(output(await(await post({...slow,input:[...slow.input,aborted,...request('and a third','user3').input]})).text()));
  assert.equal(report.resume,record(dir,logs).claudeId);
  assert.match(report.request,/and a third/);assert.doesNotMatch(report.request,/second question/);
  assert.equal(entries(dir).filter(e=>e.kind==='prompt'&&e.text.includes('second question')).length,1);
  assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.reason==='Desktop cancelled or disconnected.'));
  assert.deepEqual(rebuilt(logs),[]);
+});
+test('a message sent before Claude starts to reply starts the turn again with both messages, so no unanswered message is left behind',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('hello');
+ const a=output(await(await post(first)).text());
+ const slow={...first,input:[...first.input,...a,...request('slow-init-400 how to spell vitaly','user2').input]};
+ await stopAtInit(post,slow,logs);
+ assert.ok(logs.some(x=>x.event==='stopped_at_init'));
+ // The desktop samples again with the new message and no <turn_aborted> note.
+ // The restarted turn is stopped before its reply too.
+ const steer={...slow,input:[...slow.input,...request('????','user3').input]};
+ await stopAtInit(post,steer,logs);
+ assert.ok(logs.some(x=>x.event==='unanswered_turn_restarted'&&x.source==='native_session'&&x.items===2));
+ const final={...steer,input:[...steer.input,...request('hello??','user4').input]};
+ const out=output(await(await post(final)).text());const said=out[0].content[0].text;
+ assert.match(said,/^TRUNCATED /);const report=JSON.parse(said.slice(10));
+ const e=entries(dir);const prompts=e.filter(x=>x.kind==='prompt'&&x.text.includes('how to spell vitaly'));
+ assert.equal(prompts.length,3);
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ // Back to the first turn's reply each time, dropping the latest unanswered prompt.
+ assert.equal(report.at,e.find(x=>x.kind==='assistant').uuid);
+ assert.equal(report.drops,prompts[1].uuid);
+ // One plain turn: every message, a time note, and no stop or mid-turn notes.
+ assert.match(report.request,/how to spell vitaly[\s\S]*\?\?\?\?[\s\S]*hello\?\?[\s\S]*current_time/);
+ assert.doesNotMatch(report.request,/turn_stopped|while you were working/);
+ assert.deepEqual(logs.filter(x=>x.event==='unanswered_turn_restarted').map(x=>x.items),[2,3]);
+ assert.equal(logs.some(x=>x.event==='stopped_turn_resumed'),false);assert.deepEqual(rebuilt(logs),[]);
+ // The next turn continues the same native session.
+ const next=JSON.stringify(output(await(await post({...final,input:[...final.input,...out,...request('echo-input next','user5').input]})).text()));
+ assert.match(next,/ECHO .*echo-input next/);assert.doesNotMatch(next,/vitaly/);
+ assert.equal(logs.filter(x=>x.event==='claude_start').at(-1).resume,true);assert.deepEqual(rebuilt(logs),[]);
+});
+test('a message sent before Claude starts the first reply of a session starts a new session with both messages',async t=>{
+ const {post,logs,dir}=await setup(t);
+ const first=request('slow-init-400 echo-input how to spell vitaly');
+ await stopAtInit(post,first,logs);
+ assert.ok(logs.some(x=>x.event==='stopped_at_init'));
+ const said=JSON.stringify(output(await(await post({...first,input:[...first.input,...request('????','user2').input]})).text()));
+ assert.match(said,/ECHO [\s\S]*how to spell vitaly[\s\S]*\?\?\?\?/);assert.doesNotMatch(said,/turn_stopped|while you were working|RESUMED/);
+ const starts=logs.filter(x=>x.event==='claude_start');
+ assert.equal(starts.length,2);assert.equal(starts[1].resume,false);
+ assert.ok(logs.some(x=>x.event==='unanswered_turn_restarted'&&x.source==='desktop_transcript'));
+ const saved=record(dir,logs);assert.ok(saved.recoveredFrom);assert.notEqual(saved.recoveredFrom,saved.claudeId);
+});
+test('a message sent after Claude started to reply resumes the turn and says the synthetic reply was not Claude\'s',async t=>{
+ const {post,logs}=await setup(t);const first=request('slow-response');
+ await stopWhileStreaming(post,first,logs);
+ const report=resumed(output(await(await post({...first,input:[...first.input,...request('????','user2').input]})).text()));
+ assert.match(report.request,/No response requested\.\\?" reply for the same reason\. You did not send that reply, and the user did not see it\./);
+ assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.steer===true));
+ assert.equal(logs.some(x=>x.event==='unanswered_turn_restarted'),false);
 });
 test('a Stop before an init that never comes stops Claude Code after the wait and the next request rebuilds',async t=>{
  const {post,logs}=await setup(t,{initWaitMs:200});const first=request('hello');

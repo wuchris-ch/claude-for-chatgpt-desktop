@@ -204,6 +204,25 @@ export class Session {
     const stop=!body.__bridge_compaction&&this.record.stop;
     this.resumeItems=stop?afterStop(body.input,this.record.history,stop.seen,this.record.delivered):null;
     this.otherAfterStop=this.resumeItems?otherModelAfterStop(body.input,this.record.history):null;
+    const settled=this.record.settled;
+    // A message sent before Claude's first word of a turn makes the desktop
+    // sample again with both messages. Resumed, Claude Code puts a synthetic
+    // "No response requested." reply after the first message. In the
+    // separate-window bridge on November 9, 2026, Opus took it as its own
+    // refusal and opened with an apology for a reply the user never saw. The
+    // turn starts again instead, holding both messages: back to the last
+    // completed turn, or in a new session when there is none. Without a point
+    // to go back to, it resumes, and the note says the synthetic reply was not
+    // Claude's.
+    if(this.resumeItems&&!this.otherAfterStop&&stop.answered===false&&!stop.sent&&resampledSteer(this.resumeItems,stop.reason)) {
+      if(!this.record.started){this.resumeItems=null;await this.reset('unanswered_turn_restarted');return;}
+      const added=settled&&this.record.prompt?afterWithdrawn(body.input,settled.history,this.record.seen):null;
+      if(added) {
+        this.resumeItems=null;this.truncate={at:settled.at,prompt:this.record.prompt};this.record.history=settled.history;
+        this.log('unanswered_turn_restarted',{source:'native_session',items:added.length});
+        return;
+      }
+    }
     if(this.resumeItems){this.log('stopped_turn_resumed',{reason:stop.reason,items:this.resumeItems.length,steer:!this.otherAfterStop&&resampledSteer(this.resumeItems,stop.reason),other_model_items:this.otherAfterStop?.after.length??0});return;}
     // A request that no longer contains the stopped turn, as when the user
     // edits or withdraws its message, rebuilt the session 9 times in the
@@ -213,7 +232,6 @@ export class Session {
     // from the cache. Claude Code refuses if anything else would be dropped. A
     // turn that reached the host with a tool call, and so may also hold
     // mid-turn messages, is rebuilt instead.
-    const settled=this.record.settled;
     const added=stop&&settled&&this.record.prompt&&!stop.sent&&!this.record.delivered?.length?afterWithdrawn(body.input,settled.history,this.record.seen):null;
     if(added) {
       this.truncate={at:settled.at,prompt:this.record.prompt};this.record.history=settled.history;
@@ -589,6 +607,8 @@ export class Session {
     // Until a response completes, the native session has seen this request's input.
     if(!fork){this.record.history=historyStamp(originalInput);this.record.historyWithoutCalls=null;}
     Object.assign(this.record,{key:this.key,thread:body.__bridge_thread,kind:body.__bridge_compaction?'compaction':body.__bridge_kind,subagent:!!body.__bridge_subagent,structured:!!this.schema});
+    // Whether Claude has started any reply in this turn, across the runs that resume it.
+    if(!fork&&!this.resumeItems)this.record.answered=false;
     this.record.delivered=[];this.record.stop=null;this.record.inflight=true;this.save();
     this.log('claude_start',{model:runModel.slug,claude_model:runModel.claude_model,resume:!!(this.record.started||this.resumeItems),effort,auth:this.bridge.auth.mode});
     if(summary){const i=this.stream.startText();this.stream.text(i,idleNotice(summary.before,summary.after));this.stream.finishText(i,false);}
@@ -658,7 +678,7 @@ export class Session {
       if(msg.message.model!=='<synthetic>'&&msg.message.model!==this.activeModel)throw modelChanged(msg.message.model,this.activeModel);
       // Claude Code reports an API error as a synthetic message with the error's kind.
       if(msg.message.model==='<synthetic>'&&msg.error)this.apiError=msg.error;
-      else if(msg.uuid)this.lastAssistant=msg.uuid;
+      else if(msg.uuid){this.lastAssistant=msg.uuid;this.record.answered=true;}
       for(const c of msg.message.content??[])if(c.type==='tool_use') {
         if(this.schema&&c.name==='StructuredOutput')continue;
         const name=c.name.replace(/^mcp__chatgpt__/, '');const tool=this.tools.find(t=>t.name===name);
@@ -681,6 +701,7 @@ export class Session {
     }
     if(msg.type==='stream_event') {
       const e=msg.event;
+      if(e.type==='content_block_start')this.record.answered=true;
       if(e.type==='message_start') {
         this.messageCount=(this.messageCount??0)+1;
         this.currentText=null;this.stopReason=null;if(this.ack)this.ack.thinking='';this.thoughts=new Map();
@@ -825,7 +846,7 @@ export class Session {
   // a mid-turn message Claude Code had not yet queued is sent again on resume.
   saveStop(reason,{unseen=[...this.queued.values()].flatMap(q=>q.keys),replied=!!this.stream,...detail}={}) {
     const sent=this.nativeCalls.filter(c=>c.emitted&&!c.tool.local&&!this.record.delivered?.includes(c.id)).length;
-    this.record.stop={reason,seen:this.pendingSeen.filter(k=>!unseen.includes(k)),sent,...detail};if(replied)this.record.lastReplyAt=Date.now();this.save();
+    this.record.stop={reason,seen:this.pendingSeen.filter(k=>!unseen.includes(k)),sent,answered:this.record.answered!==false,...detail};if(replied)this.record.lastReplyAt=Date.now();this.save();
   }
   abortSearches() {this.searchAbort?.abort();this.searchAbort=null;}
   cancel(reason) {
