@@ -35,7 +35,10 @@ export function parseModels(config) {
   });
   const fallback=config.default??list[0].slug;
   if(!seen.has(fallback))throw new Error(`Default model ${fallback} is not in the catalog.`);
-  return Object.freeze({list:Object.freeze(list),default:fallback,get:slug=>list.find(m=>m.slug===slug)});
+  // The entry that writes chat titles, when the catalog names one.
+  const title=config.title_model??null;
+  if(title!==null&&!seen.has(title))throw new Error(`Title model ${title} is not in the catalog.`);
+  return Object.freeze({list:Object.freeze(list),default:fallback,title:title===null?null:list.find(m=>m.slug===title),get:slug=>list.find(m=>m.slug===slug)});
 }
 
 // Claude Code reports the model it started. An alias accepts any model of its

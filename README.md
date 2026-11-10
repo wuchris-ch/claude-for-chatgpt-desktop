@@ -217,6 +217,7 @@ Reopen ChatGPT after either change.
 - An alias entry is named after the version Claude Code last started for it, so Claude Fable 5.1 becomes Claude Fable 5.2 after the first chat on the new release.
 - A chat keeps the model name it started with in its first prompt line, after a switch to another Claude model or a new release. The bridge writes the name of the model that runs into that line.
 - The bridge checks the model Claude Code actually starts. An alias accepts any version of its family; a full model id must match exactly.
+- `title_model` names the entry that writes chat titles, Haiku by default. In the separate window, the app asks the first model in the picker for each new chat's title, and the bridge runs that request on this entry. Remove the line to run titles on the model the app asks for.
 
 To pin a version or add a model, copy the file, edit it, and pass it to setup:
 

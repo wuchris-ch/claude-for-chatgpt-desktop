@@ -543,6 +543,25 @@ test('structured output requests (titles, suggestions) return the validated JSON
  assert.equal(items.some(x=>/StructuredOutput/.test(JSON.stringify(x))),false);
  assert.equal(logs.some(x=>x.event==='request_error'||x.event==='error'),false);
 });
+test('a chat title request runs on Haiku, and its response names the model the desktop asked for',async t=>{
+ const {post,logs}=await setup(t);const thread=id=>({headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':id}});
+ const schema={$schema:'https://json-schema.org/draft/2020-12/schema',type:'object',properties:{title:{type:'string',minLength:1,maxLength:60},description:{type:'string',minLength:1}},required:['title','description'],additionalProperties:false};
+ const title={...request('name this chat'),model:'claude-fable',tools:[],reasoning:{effort:'low'},text:{format:{type:'json_schema',name:'title',strict:true,schema}}};
+ const a=await(await post(title,thread('title-thread'))).text();
+ assert.match(JSON.stringify(output(a)),/Fixture title/);
+ assert.equal(events(a).findLast(x=>x.type==='response.completed').response.model,'claude-fable');
+ const starts=()=>logs.filter(x=>x.event==='claude_start').map(x=>[x.model,x.claude_model,x.effort]);
+ assert.deepEqual(starts(),[['claude-haiku','haiku','low']]);
+ assert.ok(logs.some(x=>x.event==='request'&&x.model==='claude-haiku'&&x.title_for==='claude-fable'));
+ // The chat's own turn, and any other structured request, run on the model asked for.
+ await(await post({...request('hello'),model:'claude-fable'})).text();
+ assert.deepEqual(starts().at(-1),['claude-fable','fable','high']);
+ const other={...request('suggest'),model:'claude-fable',tools:[],text:{format:{type:'json_schema',name:'suggestions',schema:{type:'object',properties:{suggestions:{type:'array'}},required:['suggestions']}}}};
+ await(await post(other,thread('suggestions-thread'))).text();
+ assert.deepEqual(starts().at(-1),['claude-fable','fable','high']);
+ assert.equal(logs.filter(x=>x.event==='request'&&x.title_for).length,1);
+ assert.equal(logs.some(x=>x.event==='request_error'||x.event==='error'),false);
+});
 test('parallel_tool_calls=false relays one host tool call per response',async t=>{
  const {post}=await setup(t);const first={...request('two-tools'),parallel_tool_calls:false};
  const a=output(await(await post(first)).text());

@@ -1,6 +1,7 @@
 {
-  "_comment": "Claude models offered in the ChatGPT desktop picker. claude_model is passed to `claude --model`: an alias (fable, opus, sonnet, haiku) follows Claude Code to new releases, a full model id pins one version. For an alias, the version at the end of display_name is a starting point: once Claude Code starts a model for it, the picker shows that model's version. efforts lists the reasoning levels the model accepts; an empty list means the model has no effort setting.",
+  "_comment": "Claude models offered in the ChatGPT desktop picker. claude_model is passed to `claude --model`: an alias (fable, opus, sonnet, haiku) follows Claude Code to new releases, a full model id pins one version. For an alias, the version at the end of display_name is a starting point: once Claude Code starts a model for it, the picker shows that model's version. efforts lists the reasoning levels the model accepts; an empty list means the model has no effort setting. title_model is the entry that writes chat titles: in a separate window the desktop asks the first model in the picker for each new chat's title, and the bridge runs that request on this entry instead. Leave it out to run titles on the model the desktop asks for.",
   "default": "claude-opus",
+  "title_model": "claude-haiku",
   "models": [
     {
       "slug": "claude-fable",

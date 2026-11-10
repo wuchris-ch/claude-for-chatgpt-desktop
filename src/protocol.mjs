@@ -30,6 +30,27 @@ export function outputSchema(body) {
   return null;
 }
 
+// The desktop names each new chat with a hidden request beside the chat's
+// first turn. In a separate window it asks the first model in the picker,
+// whatever model the chat uses, for a title, or for a title and a description:
+// 6 and 44 of the 50 such requests in the separate-window bridge's transcripts
+// on November 9, 2026. From November 7 to 9, 28 of them ran on Fable, each
+// reading about 26,000 tokens for about 105 tokens of output, with a median of
+// 4 seconds. The desktop gave up on 7 of 71 that week, and a chat it gives up
+// on keeps a title cut from its first message.
+export function isTitleRequest(body) {
+  const properties=outputSchema(body)?.properties;
+  return !!properties&&['title','description,title'].includes(Object.keys(properties).sort().join());
+}
+// The model a request runs on: the catalog's title model for a title request,
+// when that model accepts the effort the request asks for.
+export function runModelFor(body, asked, models) {
+  const title=models.title;
+  if(!title||title===asked||!isTitleRequest(body))return asked;
+  const effort=body.reasoning?.effort;
+  return !title.efforts.length||effort==null||title.efforts.includes(effort)?title:asked;
+}
+
 // A checkpoint belongs to the bridge, not to one model, so a thread can switch
 // between Claude models and still continue from it.
 export function sealCheckpoint(summary, token) {

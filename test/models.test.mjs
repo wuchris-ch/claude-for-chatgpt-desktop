@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {loadModels, parseModels, familyOf, startedModelMatches, effortFor, versionOf, labelFor, labeled} from '../src/models.mjs';
+import {isTitleRequest, runModelFor} from '../src/protocol.mjs';
 
 const entry=extra=>({slug:'m',claude_model:'opus',display_name:'Claude Opus',efforts:['low','medium','high'],context_window:1000000,...extra});
 
@@ -36,6 +37,34 @@ test('catalog mistakes are reported instead of guessed',()=>{
  assert.throws(()=>parseModels({models:[entry({default_effort:'max'})]}),/default_effort must be one of its efforts/);
  assert.throws(()=>parseModels({models:[entry({context_window:0})]}),/positive integer/);
  assert.throws(()=>parseModels({default:'other',models:[entry()]}),/Default model other is not in the catalog/);
+});
+test('a chat title request runs on the catalog\'s title model',()=>{
+ const models=loadModels();const fable=models.get('claude-fable'),haiku=models.get('claude-haiku');
+ assert.equal(models.title,haiku);
+ // What desktop 26.1016 asks for: a title of at most 60 characters and a description.
+ const schema={$schema:'https://json-schema.org/draft/2020-12/schema',type:'object',properties:{title:{type:'string',minLength:1,maxLength:60},description:{type:'string',minLength:1}},required:['title','description'],additionalProperties:false};
+ const title={reasoning:{effort:'low'},text:{format:{type:'json_schema',name:'title',schema}}};
+ assert.equal(isTitleRequest(title),true);assert.equal(runModelFor(title,fable,models),haiku);
+ assert.equal(runModelFor(title,haiku,models),haiku);
+ // Its other form: a title of at most 36 characters, alone.
+ const alone={reasoning:{effort:'low'},text:{format:{type:'json_schema',name:'title',schema:{type:'object',properties:{title:{type:'string'}},required:['title'],additionalProperties:false}}}};
+ assert.equal(isTitleRequest(alone),true);assert.equal(runModelFor(alone,fable,models),haiku);
+ // Any other request keeps the model the desktop asked for.
+ const other=properties=>({text:{format:{type:'json_schema',schema:{type:'object',properties}}}});
+ for(const body of [{},{text:{format:{type:'json_object'}}},other({description:{type:'string'}}),other({title:{type:'string'},description:{type:'string'},tags:{type:'array'}}),other({suggestions:{type:'array'}})]) {
+  assert.equal(isTitleRequest(body),false);assert.equal(runModelFor(body,fable,models),fable);
+ }
+ // A title model that cannot run the effort the request asks for is not used.
+ const entry=(slug,more={})=>({slug,claude_model:slug,display_name:slug,context_window:1,...more});
+ const narrow=parseModels({title_model:'b',models:[entry('a',{efforts:['low','high']}),entry('b',{efforts:['high']})]});
+ assert.equal(runModelFor(title,narrow.get('a'),narrow),narrow.get('a'));
+ assert.equal(runModelFor({...title,reasoning:{effort:'high'}},narrow.get('a'),narrow),narrow.get('b'));
+ const fixed=parseModels({title_model:'b',models:[entry('a',{efforts:['low']}),entry('b')]});
+ assert.equal(runModelFor(title,fixed.get('a'),fixed),fixed.get('b'));
+ // Without a title model, titles run on the model the desktop asks for.
+ const plain=parseModels({models:[entry('a',{efforts:['low']})]});
+ assert.equal(plain.title,null);assert.equal(runModelFor(title,plain.get('a'),plain),plain.get('a'));
+ assert.throws(()=>parseModels({title_model:'z',models:[entry('a')]}),/Title model z is not in the catalog/);
 });
 test('aliases follow their family; model ids match exactly',()=>{
  assert.equal(familyOf('opus'),'opus');assert.equal(familyOf('Sonnet[1m]'),'sonnet');assert.equal(familyOf('claude-opus-5-5'),null);

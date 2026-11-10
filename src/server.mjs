@@ -8,7 +8,7 @@ import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
 import {Session, idleEligible} from './session.mjs';
 import {createSearchHandler, pickerSearch} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
-import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, ResponseStream} from './protocol.mjs';
+import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, runModelFor, ResponseStream} from './protocol.mjs';
 import {loadModels, effortFor, labelFor} from './models.mjs';
 import {parseJson, MAX_REQUEST_BYTES} from './large-json.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
@@ -215,8 +215,8 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   // One Claude request: from the separate window (/v1/responses), or from the
   // app's own OpenAI provider in picker mode, over HTTP or WebSocket.
   async function serveClaude(req,res,body) {
-    const model=models.get(body.model);
-    if(!model)return json(res,400,{error:{message:`Unknown model ${body.model}. This bridge serves ${models.list.map(m=>m.slug).join(', ')}. There is no fallback model.`}});
+    const asked=models.get(body.model);
+    if(!asked)return json(res,400,{error:{message:`Unknown model ${body.model}. This bridge serves ${models.list.map(m=>m.slug).join(', ')}. There is no fallback model.`}});
     if(!Array.isArray(body.input)||body.stream!==true)return json(res,400,{error:{message:'Streaming Responses requests with an input array are required.'}});
     const metadata=JSON.parse(req.headers['x-codex-turn-metadata']??'{}');
     // Remote compaction, which the app uses with its own provider, ends the
@@ -233,6 +233,9 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
       if(req.gateway)searching=pickerSearch(hosted,req.headers,token);
     }
     validateRequestOptions(kind==='compaction'?{...body,tools:[]}:body);
+    // A chat title runs on the catalog's title model. The response names
+    // the model the desktop asked for.
+    const model=kind==='compaction'?asked:runModelFor(body,asked,models);
     effortFor(model,body.reasoning?.effort);
     const thread=req.headers['thread-id']??req.headers['session-id']??req.headers.session_id??body.prompt_cache_key;
     if(!thread)return json(res,400,{error:{message:'A stable desktop thread identifier is required.'}});
@@ -258,7 +261,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     // run the turn again; the bridge marks its failures as final.
     if(req.appProvider)body.__bridge_final_errors=true;
     const key=[thread,metadata.context_window_id??'default',kind,checkpointKey].join(':');
-    bridge.log('request',{model:model.slug,request_kind:kind,picker:req.gateway??false,app_provider:!!req.appProvider,window:metadata.window_number,tools:body.tools?.length,items:body.input.length,...(body.__bridge_subagent?{subagent:true}:{})});
+    bridge.log('request',{model:model.slug,...(model!==asked?{title_for:asked.slug}:{}),request_kind:kind,picker:req.gateway??false,app_provider:!!req.appProvider,window:metadata.window_number,tools:body.tools?.length,items:body.input.length,...(body.__bridge_subagent?{subagent:true}:{})});
     if(!bridge.sessions.has(key))bridge.sessions.set(key,new Session(bridge,key));
     await bridge.sessions.get(key).accept(body,res,frames=>{
       try{const temp=cacheFile+'.tmp';fs.writeFileSync(temp,sealCheckpoint(frames,token),{mode:0o600});fs.renameSync(temp,cacheFile);}

@@ -479,7 +479,10 @@ export class Session {
     this.tools=tools;
     if(tools.length&&!body.__bridge_compaction)this.record.toolSet=saveToolSet(this.bridge.stateDir,tools);
     this.sequential=body.parallel_tool_calls===false;
-    this.stream=body.__bridge_compaction?new CompactionStream(res,this.bridge.token,model.slug):new ResponseStream(res,model.slug);this.textIndices=[];this.narration.clear();this.usage={input_tokens:0,output_tokens:0,total_tokens:0};
+    // A chat title runs on the catalog's title model. The response names the
+    // model the desktop asked for, so the desktop sees no change of model.
+    const named=body.model??model.slug;
+    this.stream=body.__bridge_compaction?new CompactionStream(res,this.bridge.token,named):new ResponseStream(res,named);this.textIndices=[];this.narration.clear();this.usage={input_tokens:0,output_tokens:0,total_tokens:0};
     this.stream.onComplete=onComplete;this.stream.final=!!body.__bridge_final_errors;
     this.streamInput=originalInput;
     const activeStream=this.stream;
