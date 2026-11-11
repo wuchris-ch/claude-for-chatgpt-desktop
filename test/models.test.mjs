@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {loadModels, parseModels, familyOf, startedModelMatches, effortFor, versionOf, labelFor, labeled} from '../src/models.mjs';
-import {isTitleRequest, runModelFor} from '../src/protocol.mjs';
+import {isTitleRequest, runModelFor, isSafetyFlag, safetyFlagNote} from '../src/protocol.mjs';
 
 const entry=extra=>({slug:'m',claude_model:'opus',display_name:'Claude Opus',efforts:['low','medium','high'],context_window:1000000,...extra});
 
@@ -118,4 +118,15 @@ test('GPT\'s none and minimal effort map to the lowest Claude effort; other unkn
  const model={display_name:'Claude Test',efforts:['low','medium','high'],default_effort:'medium'};
  assert.equal(effortFor(model,'minimal'),'low');assert.equal(effortFor(model,'none'),'low');
  assert.throws(()=>effortFor(model,'ultra'),e=>e.statusCode===400);
+});
+
+test('a safety flag names the model that flagged it and a Haiku model to switch to',()=>{
+ const models=parseModels(JSON.parse(fs.readFileSync(new URL('../claude-models.json',import.meta.url),'utf8')));
+ const said="API Error: Opus 5.5's safeguards flagged this message.\n\nRequest ID: req_1";
+ assert.equal(isSafetyFlag(said),true);assert.equal(isSafetyFlag('API Error: 529 Overloaded.'),false);assert.equal(isSafetyFlag(undefined),false);
+ assert.match(safetyFlagNote(models.get('claude-fable'),models,said),/^Claude Fable 5\.2's safety filter flagged.*switch this chat to Claude Haiku 5\.5 or rephrase the message\.\n\nAPI Error: Opus 5\.5's safeguards.*req_1$/s);
+ // Haiku itself, or a catalog without Haiku, points at another model.
+ assert.match(safetyFlagNote(models.get('claude-haiku'),models,said),/switch this chat to another model or rephrase/);
+ const noHaiku={list:models.list.filter(m=>!/haiku/.test(m.claude_model))};
+ assert.match(safetyFlagNote(models.get('claude-opus'),noHaiku,said),/switch this chat to another model or rephrase/);
 });

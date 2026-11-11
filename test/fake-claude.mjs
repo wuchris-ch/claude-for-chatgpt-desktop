@@ -193,6 +193,15 @@ input.on('line',async line=>{
   text('REPLAY '+JSON.stringify({input:transcript.length<5000?transcript:transcript.slice(0,500)+'\n'+transcript.slice(-1500),images:msg.message.content.filter(c=>c.type==='image').length,bytes:request.length,updatedPolicy:fs.readFileSync(arg('--system-prompt-file'),'utf8').includes('UPDATED-POLICY')}));return;
  }
  if(request.includes('api-error-')){apiError(Number(/api-error-(\d+)/.exec(request)[1]));return;}
+ // Mirrors Claude Code 2.1.321 when a safety classifier flags the message:
+ // with the refusal fallback on, it runs the request again on Opus 4.8; with it
+ // off, it ends the turn with a synthetic invalid_request error.
+ if(request.includes('safety-flag')) {
+  if(!process.env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK){send({type:'assistant',uuid:randomUUID(),message:{model:'claude-opus-4-8',content:[{type:'text',text:'Fallback answer.'}]}});finish();return;}
+  const said="API Error: Opus 5.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work.\n\nDetails: `[cyber]`\n\nRequest ID: req_fixture";
+  send({type:'assistant',uuid:randomUUID(),error:'invalid_request',isApiErrorMessage:true,message:{model:'<synthetic>',content:[{type:'text',text:said}]}});
+  send({type:'result',subtype:'success',is_error:true,result:said,modelUsage:{},permission_denials:[]});return;
+ }
  // An error result that is not an API error.
  if(request.includes('plain-error')){send({type:'result',subtype:'error_during_execution',is_error:true,errors:['fixture failure'],modelUsage:{},permission_denials:[]});return;}
  if(request.includes('question-card')) {

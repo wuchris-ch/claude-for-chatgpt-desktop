@@ -51,6 +51,17 @@ export function runModelFor(body, asked, models) {
   return !title.efforts.length||effort==null||title.efforts.includes(effort)?title:asked;
 }
 
+// Claude Code ends a turn with an API error that says this when a model's
+// safety classifier flags the message and Claude Code does not retry it on
+// another model.
+export const isSafetyFlag=said=>/safeguards flagged this message/i.test(said??'');
+// The bridge keeps the model the user picked, so it names a catalog model to
+// switch to instead: Haiku, which runs without these classifiers.
+export function safetyFlagNote(model, models, said) {
+  const other=models.list.find(m=>m!==model&&/haiku/.test(m.claude_model));
+  return `${model.display_name}'s safety filter flagged this message, so it did not reply. The bridge runs only the model you picked, so Claude Code does not retry on an older model. To continue, switch this chat to ${other?.display_name??'another model'} or rephrase the message.\n\n${said}`;
+}
+
 // A checkpoint belongs to the bridge, not to one model, so a thread can switch
 // between Claude models and still continue from it.
 export function sealCheckpoint(summary, token) {

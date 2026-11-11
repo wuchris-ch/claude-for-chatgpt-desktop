@@ -850,6 +850,19 @@ test('a message sent after an API error follows the note, and an error that is n
  assert.match(JSON.stringify(output(await(await other.post({...plain,input:[...plain.input,...request('again','user3').input]})).text())),/REPLAY/);
  assert.ok(other.logs.some(x=>x.event==='interrupted_turn_recovery'));
 });
+test('a message the safety filter flags ends with a plain note, and Claude Code does not run it again on another model',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('safety-flag please');
+ const said=failure(await(await post(first)).text());
+ assert.match(said,/^Claude Opus 5\.5's safety filter flagged this message, so it did not reply\. The bridge runs only the model you picked, so Claude Code does not retry on an older model\. To continue, switch this chat to Claude Haiku 5\.5 or rephrase the message\.\n\nAPI Error: Opus 5\.5's safeguards flagged/);
+ assert.match(said,/Request ID: req_fixture/);assert.doesNotMatch(said,/instead of/);
+ assert.ok(logs.some(x=>x.event==='safety_flag'&&x.model==='claude-opus'));
+ // The turn resumes on the model the user switches to.
+ await waitUntil(()=>exits(logs)===1);
+ const report=resumed(output(await(await post({...first,model:'claude-haiku'})).text()));
+ assert.equal(report.resume,record(dir,logs).claudeId);
+ assert.match(report.request,/ended with an API error before it finished/);
+ assert.ok(logs.some(x=>x.event==='stopped_turn_resumed'&&x.reason==='api_error'));
+});
 test('an API error after a tool result and a queued message resumes without sending either again',async t=>{
  const {post,logs,dir}=await setup(t);
  for(const [thread,mode] of [['started','tool-then-api-error'],['unstarted','tool-then-api-error unstarted']]) {

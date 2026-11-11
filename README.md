@@ -115,7 +115,7 @@ To open the window later, double-click **Open ChatGPT with Claude.command** in t
 - **Some request options are refused** with an error instead of being ignored: forced tool choice, output-token caps and non-JSON text formats.
 - **Long chats use your plan quickly.** Each Claude entry has a 1M-token context and compacts at 800k tokens, and every tool step sends the whole context, mostly from the prompt cache. The cache figures above come from subscription use, where Claude Code caches prompts for an hour. To compact sooner, set a smaller `context_window` in a models file (see Models under Configuration).
 - **Claude Code's own setup is not used.** The bridge gives Claude the app's tools and prompt instead of Claude Code's, ignores Claude Code's settings files, and clears `ANTHROPIC_*` variables, so Bedrock, Vertex, `apiKeyHelper` and custom endpoint setups don't apply.
-- **No silent model switches.** If Claude Code's safety classifiers re-run a request on a fallback model, such as Opus 4.8 for Opus 5.5, the bridge stops the turn and says why.
+- **No silent model switches.** When a model's safety classifier flags a message, Claude Code would run it again on an older model, such as Opus 4.8 for Opus 5.5. The bridge turns that retry off. The turn ends with a note that names the model and tells you to switch the chat to Haiku or rephrase the message. If Claude Code still answers on another model, the bridge stops the turn and says why.
 - **Long browser runs** drop older screenshots from Claude's context in batches (the app keeps them), so Claude takes a fresh screenshot when it needs one.
 
 ## How it works

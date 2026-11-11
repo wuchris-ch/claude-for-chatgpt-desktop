@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, idleNotice, afterWithdrawn, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
+import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, idleNotice, afterWithdrawn, isSafetyFlag, safetyFlagNote, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
@@ -76,6 +76,11 @@ function claudeEnv(bridge,pinned) {
   for(const name of Object.keys(env))if((name.startsWith('ANTHROPIC_')||name.startsWith('CLAUDE_')||name.startsWith('CODEX_'))&&!KEEP_ENV.has(name))delete env[name];
   if(pinned)Object.assign(env,{ANTHROPIC_DEFAULT_FABLE_MODEL:pinned,ANTHROPIC_DEFAULT_OPUS_MODEL:pinned,ANTHROPIC_DEFAULT_SONNET_MODEL:pinned,ANTHROPIC_DEFAULT_HAIKU_MODEL:pinned,CLAUDE_CODE_SUBAGENT_MODEL:pinned});
   Object.assign(env,{CLAUDE_CODE_DISABLE_AUTO_MEMORY:'1',DISABLE_AUTOUPDATER:'1',
+    // When a safety classifier flags a message, Claude Code otherwise runs it
+    // again on an older model (Opus 4.8 for cyber, Opus 5 for biology), and the
+    // bridge then stops the turn rather than change models. Without the retry
+    // the turn ends with an API error the bridge explains.
+    CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK:'1',
     // The desktop owns tool timeouts and yields. Claude Code's ~60 s MCP default
     // otherwise abandons long host tools while the desktop keeps running them.
     MCP_TOOL_TIMEOUT:'86400000',
@@ -774,7 +779,12 @@ export class Session {
         // request, so the turn resumes instead.
         if(this.ready&&this.record.inflight&&!(this.stream instanceof CompactionStream)&&(msg.api_error_status!=null||this.apiError))
           this.saveStop(API_FAILED,{unseen:[...this.steers.values()].flat(),replied:false,status:msg.api_error_status??null});
-        throw new Error(msg.result||msg.errors?.join('\n')||`Claude failed: ${msg.subtype}`);
+        const said=msg.result||msg.errors?.join('\n')||`Claude failed: ${msg.subtype}`;
+        if(isSafetyFlag(said)&&!(this.stream instanceof CompactionStream)) {
+          this.log('safety_flag',{model:this.runModel.slug});
+          throw new Error(safetyFlagNote(this.runModel,this.bridge.models,said));
+        }
+        throw new Error(said);
       }
       if(msg.permission_denials?.length)throw new Error('Claude tool relay permission denied.');
       if(msg.queued_turn_count>0){this.log('queued_user_turn',{count:msg.queued_turn_count});return;}
