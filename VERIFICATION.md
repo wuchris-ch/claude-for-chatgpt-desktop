@@ -4,6 +4,48 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, 0.3.15 brings fixes from a verification pass of the whole project, 0.3.16 reads chats with hundreds of megabytes of screenshots, 0.3.17 trims the screenshots a compaction keeps, 0.3.18 counts images at the size Claude Code sends, 0.3.19 moves the separate window's earlier chats to its provider, 0.3.20 has Claude answer a mid-turn question when it arrives, 0.3.21 shows the progress Claude writes in its thinking, 0.3.22 marks the messages a compaction kept between turns as earlier turns, 0.3.23 compacts idle chats before the prompt cache expires, 0.3.24 tells Claude that the app folds its progress notes when a turn ends, 0.3.25 starts Claude Fable 5.2, 0.3.26 starts a turn again when a message arrives before Claude's first word, 0.3.27 runs chat titles on Haiku, 0.3.28 ends a flagged message with a plain note instead of a retry on an older model, and 0.3.29 copies the most capable GPT entry for the Claude models and sends every message to Claude Code as written. The newest checks come first.
 
+## Release 0.3.30, checked November 16, 2026
+
+### Desktop helpers that name an OpenAI model
+
+The desktop runs small helpers on a model its own settings name: `gpt-6-luna` in desktop 26.1111. They write a chat's title, its description, a one-line activity update, and commit and pull request messages. Each asks for a structured answer at low effort and names its feature as the thread source.
+
+In the separate window a helper that starts a new thread never reaches the bridge under that name: the engine replaces a model the provider does not list with the provider's default. A helper that forks a chat keeps the name, and the bridge answered "Unknown model" and wrote no log line. In the private bridge, the desktop's log holds 8 threads refused this way from November 13 to 15, 2026.
+
+The bridge now runs a request for a model outside the catalog on the `title_model` when its thread source in `x-codex-turn-metadata` is one of `thread_title`, `thread_description`, `thread_summary`, `commit_message`, `pull_request_message` or `commit_pull_request_message`, and it asks for a structured answer. The response names the model the desktop asked for. Every other request for a model outside the catalog gets the same refusal as before, so a user's thread, a subagent, a code review or a scheduled task never runs on a model the user did not choose. The approvals reviewer (`codex-auto-review`) and the helper that checks the desktop's own suggestions stay refused, because each is a judgment written for one model. A refusal now writes `unknown_model` with the model, the thread source and whether a structured answer was asked for. In the picker, requests for GPT models go to OpenAI as before.
+
+Live with the desktop's own runtime (codex-cli 0.169.0-alpha.11.1) and Claude Code 2.1.321 against the private bridge's source, which has the same rule: a fork of a chat on `gpt-6-luna` with the source `thread_description` and a structured answer completed on Haiku 5.5 with a description of the chat. The same fork without a structured answer, and a fork with the source `user`, were refused.
+
+### A message with more than 20 content blocks
+
+The prompt cache finds an earlier entry only within 20 content blocks of the end of a request. The bridge sent each developer note as three text blocks. A message that arrived with seven or more notes passed the limit, and the request then read only the system prompt from the cache and wrote the whole conversation again. `mergeText` now joins neighboring text blocks into one block, each on its own line, where the bridge writes a turn's prompt and a mid-turn message. Image blocks keep their place.
+
+Live with Claude Code 2.1.321 on Haiku 5.5 against the private bridge's source, with a system prompt of 27,458 tokens: a second user message with 12 notes (38 blocks) read 27,458 tokens from the cache before the change and 27,721 after it, which is the system prompt and the first turn.
+
+### Two Claude Code defaults, pinned
+
+- `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`. The bridge's timing assumes the one-hour cache: the idle compaction waits 54 minutes, and a summary is used only after an hour. Claude Code chooses one hour by itself only on a subscription within its limits. It chooses 5 minutes on an API key, on usage credits, and for a model that a rollout flag names. A direct run of Claude Code 2.1.321 with the bridge's flags wrote 42,970 tokens to the 5-minute cache with the variable at `5m`, and 42,985 tokens to the one-hour cache with it at `1h`.
+- `MCP_DISCOVERY_CACHE=0`. The cache lists a server's tools from an earlier run and connects the server at the first tool call. It is off unless a rollout turns it on for the account. The relay is a new server with its own tool list on every run.
+
+Both names and their values are in the Claude Code environment variable reference, read on November 16, 2026.
+
+### The log and `/health`
+
+| Line | What is new |
+|---|---|
+| `api_request` | One line for each request Claude Code sends to the API: `ttft_ms` as Claude Code measured it, `input`, `cache_read`, `cache_write`, the auth mode, and `cache_write_5m` when part of the write used the 5-minute lifetime |
+| `turn_complete` | `usage`: the turn's input, output, cache read and cache write tokens |
+| `plan_use` | In login mode, the percent of each plan window in use and the status, when a window moves by a whole percent or the status changes |
+| `upstream_retry` | The HTTP status. Claude Code names it `error_status`; the bridge read `error.status`, so every line had no status. Also the kind of error, the retry limit and the delay |
+| `request` | `thread`, so a request can be matched to its session, and `source`, the desktop feature that started the thread |
+| `history_branch_rebuilt` | `items` and `was`, the lengths of the request's history and the saved one; `at`, the index of the first item that may differ; `exact`; and `kinds`, the types of the request's items there |
+
+The session record holds a 10-character digest of each run of 8 history items for the last line. `/health` returns `plan_use`, the plan's use as Claude Code last reported it. No log line holds message content.
+
+The desktop's own usage meter is left alone. It reads the ChatGPT account's usage from OpenAI. The usage headers the engine accepts (`x-codex-primary-used-percent` and its family) update the record of the ChatGPT account's limit, which the desktop's scheduled-run check and usage reset tool read.
+
+Tests: eight new tests cover the helper rule, the refusals, a message with 12 notes (38 blocks without the change, 1 with it), both environment values, every new log field against messages in the shape Claude Code 2.1.321 sends, the `/health` value, and the log line of a rebuilt history. Each fails without its change. 245 Node tests pass, 1 is skipped, and 77 Python tests pass.
+
 ## Release 0.3.29, checked November 16, 2026
 
 ### The catalog entry the Claude models copy

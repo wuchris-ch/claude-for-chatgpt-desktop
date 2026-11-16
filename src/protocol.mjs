@@ -51,6 +51,23 @@ export function runModelFor(body, asked, models) {
   return !title.efforts.length||effort==null||title.efforts.includes(effort)?title:asked;
 }
 
+// The desktop's own helpers, such as the line that describes a chat, ask for
+// an OpenAI model by name: gpt-6-luna in desktop 26.1111. In the separate
+// window a new helper thread never shows this, because the engine replaces a
+// model the provider does not list with the provider's default. A helper that
+// forks a chat keeps the name, and the bridge refused it. Such a request runs
+// on the catalog's title model when its thread source is one of these helpers
+// and it asks for a structured answer, which is how they read their result.
+// Every other request for a model outside the catalog is still refused, so no
+// work the user asked for runs on a model they did not choose. The approvals
+// reviewer (codex-auto-review) and the helper that checks the desktop's own
+// suggestions are left out on purpose: each is a judgment written for one
+// model.
+export const HELPER_SOURCES=new Set(['thread_title','thread_description','thread_summary','commit_message','pull_request_message','commit_pull_request_message']);
+export function helperModelFor(body, metadata, models) {
+  return models.title&&HELPER_SOURCES.has(metadata?.thread_source)&&outputSchema(body)?models.title:null;
+}
+
 // Claude Code ends a turn with an API error that says this when a model's
 // safety classifier flags the message and Claude Code does not retry it on
 // another model.
@@ -228,6 +245,31 @@ export const extendsHistory = (input, stamp) => {
   const history=historyItems(input);
   return !!stamp && history.length>=stamp.length && digest(history.slice(0,stamp.length))===stamp.fingerprint;
 };
+// A session whose history no longer matches the desktop's request is rebuilt
+// from the transcript, which writes the whole prompt cache again. The stamp
+// alone says only that something differs. A short digest of each run of 8
+// history items, saved beside the stamp, shows where: the log line of a
+// rebuild names the first run that differs and the kinds of items the request
+// has there, never their content.
+export const HISTORY_MARK_SIZE=8;
+const markOf=items=>digest(items).slice(0,10);
+export function historyMarks(input) {
+  const items=historyItems(input);const marks=[];
+  for(let i=0;i+HISTORY_MARK_SIZE<=items.length;i+=HISTORY_MARK_SIZE)marks.push(markOf(items.slice(i,i+HISTORY_MARK_SIZE)));
+  return marks;
+}
+// items and was: the length of the request's history and of the stamped one.
+// at: the index of the first item that may differ. exact: the difference is
+// within the 8 items from there; otherwise it is at or after that index, in
+// the part the marks do not cover.
+export function historyDifference(input, stamp, marks) {
+  const items=historyItems(input);const was=stamp?.length??0;
+  if(!Array.isArray(marks))return {items:items.length,was};
+  const runs=Math.min(Math.floor(Math.min(was,items.length)/HISTORY_MARK_SIZE),marks.length);
+  let i=0;while(i<runs&&markOf(items.slice(i*HISTORY_MARK_SIZE,(i+1)*HISTORY_MARK_SIZE))===marks[i])i++;
+  const at=i*HISTORY_MARK_SIZE;
+  return {items:items.length,was,at,exact:i<runs,kinds:items.slice(at,at+HISTORY_MARK_SIZE).map(x=>x.type==='message'?`message:${x.role}`:String(x.type))};
+}
 // Developer notes after the start of the conversation and after the history a
 // stamp covers, so a note reaches Claude once, where the desktop placed it.
 // Index just past the input items a history stamp covers.
@@ -527,6 +569,22 @@ export function replayImageNote(items, {otherModel = false} = {}) {
 // name such as /compact itself, without the model. Mid-turn it holds any such
 // message for a separate turn after the answer, which has no desktop response
 // to stream into. A leading tag keeps it ordinary text.
+// The prompt cache finds an earlier entry only within 20 content blocks of
+// the end of a request. A developer note is three blocks here, so a message
+// that arrives with seven notes passed that limit, and the request then read
+// only the system prompt from the cache and wrote the whole conversation
+// again. Neighboring text blocks become one block, each on its own line.
+// Images keep their place between them.
+export function mergeText(content) {
+  const out=[];
+  for(const block of content) {
+    const last=out.at(-1);
+    const plain=x=>x?.type==='text'&&typeof x.text==='string'&&Object.keys(x).length===2;
+    if(plain(block)&&plain(last))out[out.length-1]={type:'text',text:[last.text,block.text].filter(Boolean).join('\n')};
+    else out.push(block);
+  }
+  return out;
+}
 export function asPrompt(content) {
   if (content[0]?.type !== 'text' || !content[0].text.trimStart().startsWith('/')) return content;
   return [{type: 'text', text: '<user_message>'}, ...content, {type: 'text', text: '</user_message>'}];

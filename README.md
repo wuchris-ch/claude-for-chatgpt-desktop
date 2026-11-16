@@ -219,7 +219,7 @@ Reopen ChatGPT after either change.
 - An alias entry is named after the version Claude Code last started for it, so Claude Fable 5.1 becomes Claude Fable 5.2 after the first chat on the new release.
 - A chat keeps the model name it started with in its first prompt line, after a switch to another Claude model or a new release. The bridge writes the name of the model that runs into that line.
 - The bridge checks the model Claude Code actually starts. An alias accepts any version of its family; a full model id must match exactly.
-- `title_model` names the entry that writes chat titles, Haiku by default. In the separate window, the app asks the first model in the picker for each new chat's title, and the bridge runs that request on this entry. Remove the line to run titles on the model the app asks for.
+- `title_model` names the entry that writes chat titles, Haiku by default. In the separate window, the app asks the first model in the picker for each new chat's title, and the bridge runs that request on this entry. Remove the line to run titles on the model the app asks for. The app's other small helpers, which describe a chat or write a commit message, name an OpenAI model. A helper that forks a chat sends that name to the bridge, and the bridge runs it on this entry too. Any other request for a model outside the list is refused.
 
 To pin a version or add a model, copy the file, edit it, and pass it to setup:
 
@@ -240,6 +240,7 @@ python3 scripts/setup.py --models ~/my-claude-models.json
 - By default the bridge runs the unmodified `claude` binary with your normal Claude Code login.
 - It never reads Claude Code's credentials, and it clears inherited `ANTHROPIC_*` and `CLAUDE_*` variables (except `CLAUDE_CONFIG_DIR`) so nothing else changes the account or endpoint. Bedrock, Vertex and custom endpoint setups therefore don't apply.
 - For heavy use, an Anthropic API key is the better fit: Anthropic's plan limits assume ordinary, individual use of Claude Code. In API key mode Claude Code uses the key instead of your login.
+- In both modes the bridge asks Claude Code for the one-hour prompt cache (`CLAUDE_CODE_PROMPT_CACHE_TTL=1h`). On an API key Claude Code would otherwise use 5 minutes, and a chat left for longer would be written to the cache again in full. The API bills one-hour cache writes at a higher rate than 5-minute writes.
 
 ```sh
 python3 scripts/setup.py --auth api-key

@@ -8,7 +8,7 @@ import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
 import {Session, idleEligible} from './session.mjs';
 import {createSearchHandler, pickerSearch} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
-import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, runModelFor, ResponseStream} from './protocol.mjs';
+import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, runModelFor, helperModelFor, outputSchema, ResponseStream} from './protocol.mjs';
 import {loadModels, effortFor, labelFor} from './models.mjs';
 import {parseJson, MAX_REQUEST_BYTES} from './large-json.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
@@ -215,10 +215,16 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   // One Claude request: from the separate window (/v1/responses), or from the
   // app's own OpenAI provider in picker mode, over HTTP or WebSocket.
   async function serveClaude(req,res,body) {
-    const asked=models.get(body.model);
-    if(!asked)return json(res,400,{error:{message:`Unknown model ${body.model}. This bridge serves ${models.list.map(m=>m.slug).join(', ')}. There is no fallback model.`}});
-    if(!Array.isArray(body.input)||body.stream!==true)return json(res,400,{error:{message:'Streaming Responses requests with an input array are required.'}});
     const metadata=JSON.parse(req.headers['x-codex-turn-metadata']??'{}');
+    const source=typeof metadata.thread_source==='string'?metadata.thread_source.slice(0,64):undefined;
+    const listed=models.get(body.model);
+    // One of the desktop's helpers asked for an OpenAI model by name.
+    const asked=listed??helperModelFor(body,metadata,models);
+    if(!asked) {
+      bridge.log('unknown_model',{model:String(body.model).slice(0,64),source,structured:!!outputSchema(body)});
+      return json(res,400,{error:{message:`Unknown model ${body.model}. This bridge serves ${models.list.map(m=>m.slug).join(', ')}. There is no fallback model.`}});
+    }
+    if(!Array.isArray(body.input)||body.stream!==true)return json(res,400,{error:{message:'Streaming Responses requests with an input array are required.'}});
     // Remote compaction, which the app uses with its own provider, ends the
     // input with a compaction_trigger item.
     const kind=metadata.request_kind==='compaction'||body.input.at(-1)?.type==='compaction_trigger'?'compaction':metadata.request_kind??'turn';
@@ -261,7 +267,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     // run the turn again; the bridge marks its failures as final.
     if(req.appProvider)body.__bridge_final_errors=true;
     const key=[thread,metadata.context_window_id??'default',kind,checkpointKey].join(':');
-    bridge.log('request',{model:model.slug,...(model!==asked?{title_for:asked.slug}:{}),request_kind:kind,picker:req.gateway??false,app_provider:!!req.appProvider,window:metadata.window_number,tools:body.tools?.length,items:body.input.length,...(body.__bridge_subagent?{subagent:true}:{})});
+    bridge.log('request',{thread,model:model.slug,...(model!==asked?{title_for:asked.slug}:{}),...(listed?{}:{helper_for:String(body.model).slice(0,64)}),source,request_kind:kind,picker:req.gateway??false,app_provider:!!req.appProvider,window:metadata.window_number,tools:body.tools?.length,items:body.input.length,...(body.__bridge_subagent?{subagent:true}:{})});
     if(!bridge.sessions.has(key))bridge.sessions.set(key,new Session(bridge,key));
     await bridge.sessions.get(key).accept(body,res,frames=>{
       try{const temp=cacheFile+'.tmp';fs.writeFileSync(temp,sealCheckpoint(frames,token),{mode:0o600});fs.renameSync(temp,cacheFile);}
@@ -295,7 +301,9 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
         url.pathname=rest;req.appProvider=true;
       } else if(!authenticated(req))return json(res,401,{error:{message:'Bridge authentication required.'}});
       if(url.pathname==='/health')return json(res,200,{status:'ok',version:VERSION,models:models.list.map(m=>m.slug),auth:auth.mode,web_search:bridge.webSearch,picker:!!gateway,app_provider:true,sessions:bridge.sessions.size,
-        active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length,active_relays:gateway?.active()??0,idle_compactions:bridge.idle.jobs.size});
+        active_sessions:[...bridge.sessions.values()].filter(x=>x.child||x.accepting).length,active_relays:gateway?.active()??0,idle_compactions:bridge.idle.jobs.size,
+        // The Claude plan's use, as Claude Code last reported it: percent of each window and when it resets.
+        plan_use:bridge.planUse?{status:bridge.planUse.status,at:new Date(bridge.planUse.at).toISOString(),windows:bridge.planUse.windows}:null});
       if(url.pathname==='/v1/models')return json(res,200,{object:'list',data:models.list.map(m=>({id:m.slug,object:'model',owned_by:'anthropic',display_name:bridge.label(m)}))});
       if(req.method==='POST'&&url.pathname==='/v1/alpha/search') {
         if(!bridge.webSearch)return json(res,404,{error:{message:'Web search is turned off for this bridge. Run setup again with --web-search to turn it on.'}});

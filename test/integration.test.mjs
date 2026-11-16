@@ -556,6 +556,84 @@ test('structured output requests (titles, suggestions) return the validated JSON
  assert.equal(items.some(x=>/StructuredOutput/.test(JSON.stringify(x))),false);
  assert.equal(logs.some(x=>x.event==='request_error'||x.event==='error'),false);
 });
+test('the log records each API request, a retry, the plan\'s use and what a turn used, without any content',async t=>{
+ const {post,logs,b:bridge}=await setup(t);
+ const health=async()=>(await(await fetch(bridge.url+'/health',{headers:{Authorization:'Bearer fixture-secret'}})).json()).plan_use;
+ assert.equal(await health(),null);
+ const first=request('log-probe one');const a=await(await post(first)).text();assert.match(JSON.stringify(output(a)),/LOGGED/);
+ const pick=(event,keys)=>logs.filter(x=>x.event===event).map(x=>Object.fromEntries(keys.map(k=>[k,x[k]])));
+ assert.deepEqual(pick('request',['thread','model']),[{thread:'fixture',model:MODEL}]);
+ assert.deepEqual(pick('api_request',['model','auth','ttft_ms','input','cache_read','cache_write','cache_write_5m']),[{model:'claude-opus-5-5',auth:'claude_login',ttft_ms:1454,input:2,cache_read:42337,cache_write:646,cache_write_5m:undefined}]);
+ // Claude Code names the status error_status; the bridge read error.status and logged nothing.
+ assert.deepEqual(pick('upstream_retry',['attempt','max','status','error','delay_ms']),[{attempt:1,max:10,status:529,error:'server_error',delay_ms:1200}]);
+ assert.deepEqual(pick('plan_use',['status','type','five_hour','seven_day','overage']),[{status:'allowed',type:'seven_day',five_hour:31,seven_day:25,overage:undefined}]);
+ assert.deepEqual(pick('turn_complete',['usage']),[{usage:{cache_read:42337,cache_write:646,input:2,output:4}}]);
+ assert.deepEqual((await health()).windows,{five_hour:{used:31,resets:1794830400,status:'allowed'},seven_day:{used:25,resets:1795312800,status:'allowed'}});
+ // The next turn: the session reports its usage since it began, and the log holds this turn's part.
+ // The plan's use moved by less than a percent, so it gets no new line.
+ const second={...first,input:[...first.input,...output(a),...request('log-probe two short-cache','user2').input]};
+ const b=await(await post(second)).text();
+ assert.deepEqual(pick('turn_complete',['usage']).at(-1),{usage:{cache_read:42337,cache_write:646,input:2,output:4}});
+ assert.equal(pick('api_request',['cache_write_5m']).at(-1).cache_write_5m,646);
+ assert.equal(logs.filter(x=>x.event==='plan_use').length,1);
+ const third={...second,input:[...second.input,...output(b),...request('log-probe three more-use','user3').input]};
+ await(await post(third)).text();
+ assert.deepEqual(pick('plan_use',['five_hour','seven_day']).at(-1),{five_hour:33,seven_day:25});
+ assert.equal(logs.filter(x=>x.event==='plan_use').length,2);
+ assert.ok(!JSON.stringify(logs).includes('log-probe'));
+ assert.equal(logs.some(x=>x.event==='request_error'||x.event==='error'),false);
+});
+test('a rebuilt history is logged with the place of the first difference and the kinds of items there',async t=>{
+ const {post,logs}=await setup(t);
+ // Ten turns give a history of 20 items: two full runs of 8 and a tail.
+ let input=request('turn 0','user0').input;let last;
+ for(let i=1;i<=10;i++){last=output(await(await post({...request('x'),input})).text());input=[...input,...last,...request(`turn ${i}`,`user${i}`).input];}
+ assert.equal(logs.some(x=>x.event==='history_branch_rebuilt'),false);
+ // The desktop now sends a history whose eleventh item changed.
+ const changed=input.map((x,i)=>i===10?{...x,content:[{type:'input_text',text:'an edited message'}]}:x);
+ await(await post({...request('x'),input:changed})).text();
+ const line=logs.find(x=>x.event==='history_branch_rebuilt');
+ assert.deepEqual({items:line.items,was:line.was,at:line.at,exact:line.exact},{items:21,was:20,at:8,exact:true});
+ assert.deepEqual(line.kinds,['message:user','message:assistant','message:user','message:assistant','message:user','message:assistant','message:user','message:assistant']);
+ assert.ok(!JSON.stringify(line).includes('edited'));
+});
+test('a message that arrives with many developer notes reaches Claude in few content blocks, so the prompt cache still finds the conversation',async t=>{
+ const {post,logs}=await setup(t);
+ const first=request('hello');const a=await(await post(first)).text();
+ const notes=Array.from({length:12},(_,i)=>({type:'message',id:`dev${i}`,role:'developer',content:[{type:'input_text',text:`tide note ${i}`}]}));
+ const second={...first,input:[...first.input,...output(a),...notes,{type:'message',id:'user2',role:'user',content:[{type:'input_text',text:'echo-input now'}]}]};
+ const said=output(await(await post(second)).text()).filter(x=>x.type==='message').map(x=>x.content.map(c=>c.text).join('')).join('');
+ const blocks=JSON.parse(/ECHO (\[.*\])$/s.exec(said)[1]);
+ // The cache looks back 20 blocks. Unmerged, these notes alone are 36.
+ assert.equal(blocks.length,1);assert.equal(blocks[0].type,'text');
+ for(let i=0;i<12;i++)assert.ok(blocks[0].text.includes(`<developer_message>\ntide note ${i}\n</developer_message>`));
+ assert.match(blocks[0].text,/<\/developer_message>\necho-input now\n/);
+ assert.equal(logs.some(x=>x.event==='request_error'||x.event==='error'),false);
+});
+test('a desktop helper that asks for an OpenAI model runs on Haiku, and other requests for that model are refused',async t=>{
+ const {post,logs}=await setup(t);
+ // Desktop 26.1111 describes a chat with a fork of it, on gpt-6-luna at low effort.
+ const schema={$schema:'https://json-schema.org/draft/2020-12/schema',type:'object',properties:{description:{type:'string',minLength:1}},required:['description'],additionalProperties:false};
+ const describe={...request('describe this chat'),model:'gpt-6-luna',tools:[],reasoning:{effort:'low'},text:{format:{type:'json_schema',name:'description',strict:true,schema}}};
+ const from=(thread,metadata)=>({headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':thread,...(metadata?{'x-codex-turn-metadata':JSON.stringify(metadata)}:{})}});
+ const a=await(await post(describe,from('helper-thread',{thread_source:'thread_description',turn_id:'t1'}))).text();
+ assert.match(JSON.stringify(output(a)),/Fixture title/);
+ assert.equal(events(a).findLast(x=>x.type==='response.completed').response.model,'gpt-6-luna');
+ const starts=()=>logs.filter(x=>x.event==='claude_start').map(x=>[x.model,x.claude_model,x.effort]);
+ assert.deepEqual(starts(),[['claude-haiku','haiku','low']]);
+ assert.ok(logs.some(x=>x.event==='request'&&x.model==='claude-haiku'&&x.helper_for==='gpt-6-luna'&&x.source==='thread_description'&&!x.title_for));
+ // Anything else keeps the plain refusal: no structured answer, no thread source, a user's thread, a code review, the approvals reviewer.
+ const refused=[[{...describe,text:undefined},{thread_source:'thread_description'}],[describe,undefined],[describe,{thread_source:'user'}],[describe,{thread_source:'code_review'}],
+  [{...describe,model:'codex-auto-review'},{thread_source:'guardian_review'}]];
+ for(const [body,metadata] of refused) {
+  const r=await post(body,from('refused-thread',metadata));
+  assert.equal(r.status,400);assert.match((await r.json()).error.message,/^Unknown model (gpt-6-luna|codex-auto-review)\. This bridge serves claude-fable/);
+ }
+ assert.equal(starts().length,1);
+ assert.deepEqual(logs.filter(x=>x.event==='unknown_model').map(x=>[x.model,x.source,x.structured]),
+  [['gpt-6-luna','thread_description',false],['gpt-6-luna',undefined,true],['gpt-6-luna','user',true],['gpt-6-luna','code_review',true],['codex-auto-review','guardian_review',true]]);
+ assert.equal(logs.some(x=>x.event==='request_error'||x.event==='error'),false);
+});
 test('a chat title request runs on Haiku, and its response names the model the desktop asked for',async t=>{
  const {post,logs}=await setup(t);const thread=id=>({headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':id}});
  const schema={$schema:'https://json-schema.org/draft/2020-12/schema',type:'object',properties:{title:{type:'string',minLength:1,maxLength:60},description:{type:'string',minLength:1}},required:['title','description'],additionalProperties:false};
@@ -589,6 +667,13 @@ test('parallel_tool_calls=false relays one host tool call per response',async t=
 test('long or silent host tools are not abandoned, and long descriptions and large results reach Claude whole',async t=>{
  const {post}=await setup(t);
  assert.match(JSON.stringify(output(await(await post(request('env-probe'))).text())),/ENV 86400000 4000000 idle:0 output:200000 size:1000000 /);
+});
+test('Claude Code keeps the one-hour prompt cache and no MCP discovery cache, whatever the login or a rollout says',async t=>{
+ // The service's own environment cannot change either.
+ process.env.MCP_DISCOVERY_CACHE='1';process.env.CLAUDE_CODE_PROMPT_CACHE_TTL='5m';
+ t.after(()=>{delete process.env.MCP_DISCOVERY_CACHE;delete process.env.CLAUDE_CODE_PROMPT_CACHE_TTL;});
+ const {post}=await setup(t);
+ assert.match(JSON.stringify(output(await(await post(request('env-probe'))).text())),/ ttl:1h discovery:0 /);
 });
 const probe=async(post,text,body={},thread='fixture')=>{
  const out=output(await(await post({...request(text),...body},{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':thread}})).text());

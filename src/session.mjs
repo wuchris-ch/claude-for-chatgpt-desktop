@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, idleNotice, afterWithdrawn, isSafetyFlag, safetyFlagNote, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
+import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, mergeText, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, historyMarks, historyDifference, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, idleNotice, afterWithdrawn, isSafetyFlag, safetyFlagNote, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
@@ -81,6 +81,18 @@ function claudeEnv(bridge,pinned) {
     // bridge then stops the turn rather than change models. Without the retry
     // the turn ends with an API error the bridge explains.
     CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK:'1',
+    // The bridge's cache timing (CACHE_TTL_MS, the idle compaction) assumes
+    // the one-hour prompt cache. Claude Code picks that by itself only on a
+    // subscription within its limits: it uses 5 minutes on an API key, on
+    // usage credits, and for any model a rollout flag names (Claude Code
+    // 2.1.321, env-vars docs). The API bills one-hour cache writes at a
+    // higher rate, and a chat left for more than 5 minutes is not written
+    // again in full.
+    CLAUDE_CODE_PROMPT_CACHE_TTL:'1h',
+    // A rollout can turn on the MCP discovery cache, which lists a server's
+    // tools from an earlier run and connects it at the first tool call. The
+    // relay is a new server with its own tool list on every run.
+    MCP_DISCOVERY_CACHE:'0',
     // The desktop owns tool timeouts and yields. Claude Code's ~60 s MCP default
     // otherwise abandons long host tools while the desktop keeps running them.
     MCP_TOOL_TIMEOUT:'86400000',
@@ -193,8 +205,8 @@ export class Session {
       });
     }
   }
-  async reset(reason) {
-    this.log(reason,{source:'desktop_transcript'});
+  async reset(reason,detail={}) {
+    this.log(reason,{source:'desktop_transcript',...detail});
     const child=this.child;
     if(child){this.cancel(reason);await this.exiting;}
     this.pending.clear();this.results.clear();this.nativeCalls=[];this.resumeItems=null;this.otherAfterStop=null;this.truncate=null;
@@ -270,7 +282,7 @@ export class Session {
   // reports the message queued keeps them together.
   steer(fresh) {
     const uuid=randomUUID();
-    this.child.stdin.write(JSON.stringify({type:'user',uuid,client_composed:true,message:{role:'user',content:steeringPrompt(fresh)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
+    this.child.stdin.write(JSON.stringify({type:'user',uuid,client_composed:true,message:{role:'user',content:mergeText(steeringPrompt(fresh))},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
     this.log('user_steering',{messages:fresh.length});
     if(fresh.some(x=>x.type==='message'&&x.role==='user'))this.ack={thinking:''};
     const keys=fresh.map(inputKey);this.steers.set(uuid,keys);
@@ -446,7 +458,7 @@ export class Session {
     let superseded=null;
     if((this.record.started||this.child)&&!extendsHistory(body.input,this.record.history)) {
       superseded=this.supersededCalls(body.input);
-      if(!superseded)await this.reset('history_branch_rebuilt');
+      if(!superseded)await this.reset('history_branch_rebuilt',historyDifference(body.input,this.record.history,this.record.historyMarks));
     }
     const model=body.__bridge_model;
     // The desktop keeps one model for a turn. A different model while a
@@ -614,7 +626,7 @@ export class Session {
     // Claude Code keeps the uuid of a stream-json message as its transcript entry's uuid.
     const promptId=randomUUID();this.record.prompt=fork?null:promptId;
     // Until a response completes, the native session has seen this request's input.
-    if(!fork){this.record.history=historyStamp(originalInput);this.record.historyWithoutCalls=null;}
+    if(!fork){this.record.history=historyStamp(originalInput);this.record.historyMarks=historyMarks(originalInput);this.record.historyWithoutCalls=null;}
     Object.assign(this.record,{key:this.key,thread:body.__bridge_thread,kind:body.__bridge_compaction?'compaction':body.__bridge_kind,subagent:!!body.__bridge_subagent,structured:!!this.schema});
     // Whether Claude has started any reply in this turn, across the runs that resume it.
     if(!fork&&!this.resumeItems)this.record.answered=false;
@@ -649,7 +661,7 @@ export class Session {
     // there. A message from another agent, a timer or a rebuilt transcript can
     // end the prompt, and on Claude Code 2.1.321 a path in one was read.
     // client_composed delivers the text as written.
-    child.stdin.write(JSON.stringify({type:'user',uuid:promptId,client_composed:true,message:{role:'user',content:asPrompt(input)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
+    child.stdin.write(JSON.stringify({type:'user',uuid:promptId,client_composed:true,message:{role:'user',content:mergeText(asPrompt(input))},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
   }
   async relaunch(context) {
     const {imageCutoff,userImageCutoff,toolSet}=this.record;
@@ -727,6 +739,12 @@ export class Session {
         const u=e.message.usage??{};
         this.usage.input_tokens=(u.input_tokens??0)+(u.cache_read_input_tokens??0)+(u.cache_creation_input_tokens??0);
         this.usage.input_tokens_details={cached_tokens:u.cache_read_input_tokens??0};
+        // One line for each request Claude Code sends to the API: the time to
+        // the first token as Claude Code measured it, and what the request
+        // read from and wrote to the prompt cache. cache_write_5m is the part
+        // written with the 5-minute lifetime, which the bridge does not expect.
+        const short=u.cache_creation?.ephemeral_5m_input_tokens??0;
+        this.log('api_request',{model:this.activeModel,auth:this.bridge.auth.mode,ttft_ms:msg.ttft_ms,input:u.input_tokens??0,cache_read:u.cache_read_input_tokens??0,cache_write:u.cache_creation_input_tokens??0,...(short?{cache_write_5m:short}:{})});
       }
       if(e.type==='content_block_start'&&e.content_block.type==='text') {
         this.currentText=this.stream.startText();this.textIndices.push(this.currentText);
@@ -799,18 +817,35 @@ export class Session {
         if(msg.structured_output===undefined)throw new Error('Claude did not return the requested structured output.');
         const i=this.stream.startText();this.stream.text(i,JSON.stringify(msg.structured_output));this.stream.finishText(i,true);
       }
+      // What this turn used: a resumed session reports its usage since it began,
+      // for each model. After a change of model the earlier total is another model's.
+      const total=nativeUsage(msg.modelUsage?.[this.activeModel]);
+      const used=usageSince(total,!this.record.started?{cache_read:0,cache_write:0,input:0,output:0}:this.record.activeModel===this.activeModel?this.record.nativeUsage:null);
       this.record.started=true;this.record.inflight=false;this.record.seen=this.pendingSeen;this.record.turnEnd=this.lastAssistant;
       this.record.contextTokens=this.usage.input_tokens+this.usage.output_tokens;this.record.cacheAt=this.cacheAt??Date.now();
       // An idle compaction runs this model again, so it reads this turn's cache.
-      this.record.activeModel=this.activeModel;this.record.nativeUsage=nativeUsage(msg.modelUsage?.[this.activeModel]);this.save();
-      this.bridge.idle?.note(this);this.log('turn_complete',{model:this.activeModel,context_window:msg.modelUsage?.[this.activeModel]?.contextWindow});
+      this.record.activeModel=this.activeModel;this.record.nativeUsage=total;this.save();
+      this.bridge.idle?.note(this);this.log('turn_complete',{model:this.activeModel,context_window:msg.modelUsage?.[this.activeModel]?.contextWindow,...(Object.keys(used).length?{usage:used}:{})});
       const compacted=this.stream instanceof CompactionStream&&!!this.stream.summary.trim();
       this.completeStream();
       if(compacted)this.releaseCompactedTurn();
       const child=this.child;
       if(child){this.exiting=this.childDone;child.stdin.end();this.reap(child);}
     }
-    if(msg.type==='system'&&msg.subtype==='api_retry')this.log('upstream_retry',{attempt:msg.attempt,status:msg.error?.status});
+    // Claude Code 2.1.321 names the HTTP status error_status and the kind of error in error.
+    if(msg.type==='system'&&msg.subtype==='api_retry')this.log('upstream_retry',{attempt:msg.attempt,max:msg.max_retries,status:msg.error_status??null,error:typeof msg.error==='string'?msg.error.slice(0,40):undefined,delay_ms:msg.retry_delay_ms});
+    if(msg.type==='rate_limit_event'&&this.bridge.auth.mode!=='api_key')this.notePlanUse(msg.rate_limit_info);
+  }
+  // Claude Code reports the plan's limits after each request. The log gets a
+  // line when a window's use moves by a whole percent or its status changes.
+  notePlanUse(info) {
+    if(!info||typeof info!=='object')return;
+    const windows={};
+    for(const [name,w] of Object.entries(info.unifiedWindows??{}))if(typeof w?.utilization==='number')windows[name]={used:Math.round(w.utilization*100),resets:w.resetsAt??null,status:w.status??null};
+    const now={status:info.status??null,windows,at:Date.now()};const last=this.bridge.planUse;
+    this.bridge.planUse=now;
+    const same=last&&last.status===now.status&&Object.keys(windows).every(k=>last.windows[k]?.used===windows[k].used&&last.windows[k]?.status===windows[k].status);
+    if(!same)this.log('plan_use',{status:now.status,type:info.rateLimitType??null,...Object.fromEntries(Object.entries(windows).map(([k,w])=>[k,w.used])),...(info.isUsingOverage?{overage:true}:{})});
   }
   emitCalls(calls) {
     for(const c of calls){c.emitted=true;this.stream.tool(c.tool,c.id,c.args);this.log('tool_call',{name:c.tool.originalName,call_id:c.id});if(c.tool.originalName==='clock.sleep')this.watchSleep(c);}
@@ -833,7 +868,7 @@ export class Session {
   }
   completeStream() {
     if(this.stream?.finished)return;
-    this.record.history=historyStamp([...this.streamInput,...this.stream.output]);
+    this.record.history=historyStamp([...this.streamInput,...this.stream.output]);this.record.historyMarks=historyMarks([...this.streamInput,...this.stream.output]);
     const calls=this.stream.output.filter(x=>['function_call','custom_tool_call'].includes(x.type));
     this.record.historyWithoutCalls=calls.length?historyStamp([...this.streamInput,...this.stream.output.filter(x=>!calls.includes(x))]):null;
     this.record.lastReplyAt=Date.now();this.save();

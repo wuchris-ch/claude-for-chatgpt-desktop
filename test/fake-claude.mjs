@@ -144,7 +144,20 @@ input.on('line',async line=>{
  if(request.includes('echo-input')){text('ECHO '+request);return;}
  // Stands in for a long think: no stream events at all until the answer.
  if(request.includes('silent-think')){setTimeout(()=>text('AWAKE'),Number(/silent-think-(\d+)/.exec(request)?.[1]??1000));return;}
- if(request.includes('env-probe')){text('ENV '+process.env.MCP_TOOL_TIMEOUT+' '+process.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH+' idle:'+process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT+' output:'+process.env.MAX_MCP_OUTPUT_TOKENS+' size:'+listed.tools[0]?._meta?.['anthropic/maxResultSizeChars']+' token:'+(process.env.CLAUDE_CODE_OAUTH_TOKEN??'none'));return;}
+ if(request.includes('env-probe')){text('ENV '+process.env.MCP_TOOL_TIMEOUT+' '+process.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH+' idle:'+process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT+' output:'+process.env.MAX_MCP_OUTPUT_TOKENS+' size:'+listed.tools[0]?._meta?.['anthropic/maxResultSizeChars']+' ttl:'+process.env.CLAUDE_CODE_PROMPT_CACHE_TTL+' discovery:'+process.env.MCP_DISCOVERY_CACHE+' token:'+(process.env.CLAUDE_CODE_OAUTH_TOKEN??'none'));return;}
+ // Mirrors Claude Code 2.1.321, recorded November 16, 2026: a retry notice, the first-token time and cache
+ // use on message_start, the plan's limits after the request, and usage for the whole native session.
+ if(request.includes('log-probe')) {
+  const counter=path.join(path.dirname(arg('--system-prompt-file')),'fake-log-probe-'+(process.argv.includes('--resume')?arg('--resume'):arg('--session-id')));
+  const turns=(fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0)+1;fs.writeFileSync(counter,String(turns));
+  send({type:'system',subtype:'api_retry',attempt:1,max_retries:10,retry_delay_ms:1200,error_status:529,error:'server_error'});
+  send({type:'stream_event',ttft_ms:1454,event:{type:'message_start',message:{model,usage:{input_tokens:2,cache_creation_input_tokens:646,cache_read_input_tokens:42337,cache_creation:{ephemeral_5m_input_tokens:request.includes('short-cache')?646:0,ephemeral_1h_input_tokens:request.includes('short-cache')?0:646},output_tokens:4}}}});
+  event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:'LOGGED'}});assistant([{type:'text',text:'LOGGED'}]);
+  event({type:'message_delta',delta:{stop_reason:'end_turn'},usage:{output_tokens:4}});event({type:'message_stop'});
+  send({type:'rate_limit_event',rate_limit_info:{status:'allowed',resetsAt:1795312800,rateLimitType:'seven_day',overageStatus:'rejected',isUsingOverage:false,
+   unifiedWindows:{five_hour:{utilization:request.includes('more-use')?0.325:0.314,resetsAt:1794830400,status:'allowed'},seven_day:{utilization:0.25,resetsAt:1795312800,status:'allowed'}}}});
+  send({type:'result',is_error:false,modelUsage:{[model]:{inputTokens:2*turns,outputTokens:4*turns,cacheReadInputTokens:42337*turns,cacheCreationInputTokens:646*turns,contextWindow:1000000}},permission_denials:[]});return;
+ }
  if(request.includes('args-probe')){text('ARGS '+JSON.stringify({model,effort:process.argv.includes('--effort')?arg('--effort'):null,resume:process.argv.includes('--resume')?arg('--resume'):null,session:process.argv.includes('--session-id')?arg('--session-id'):null,prompt:fs.readFileSync(arg('--system-prompt-file'),'utf8').slice(0,40),slashCommands:!process.argv.includes('--disable-slash-commands')}));return;}
  if(request.includes('auth-probe')){text('AUTH '+JSON.stringify({key:process.env.ANTHROPIC_API_KEY??null,oauth:process.env.CLAUDE_CODE_OAUTH_TOKEN??null,base:process.env.ANTHROPIC_BASE_URL??null,configDir:process.env.CLAUDE_CONFIG_DIR??null}));return;}
  if(request.includes('model-probe')){

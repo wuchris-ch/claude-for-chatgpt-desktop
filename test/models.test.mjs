@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {loadModels, parseModels, familyOf, startedModelMatches, effortFor, versionOf, labelFor, labeled} from '../src/models.mjs';
-import {isTitleRequest, runModelFor, isSafetyFlag, safetyFlagNote} from '../src/protocol.mjs';
+import {isTitleRequest, runModelFor, helperModelFor, isSafetyFlag, safetyFlagNote} from '../src/protocol.mjs';
 
 const entry=extra=>({slug:'m',claude_model:'opus',display_name:'Claude Opus',efforts:['low','medium','high'],context_window:1000000,...extra});
 
@@ -37,6 +37,17 @@ test('catalog mistakes are reported instead of guessed',()=>{
  assert.throws(()=>parseModels({models:[entry({default_effort:'max'})]}),/default_effort must be one of its efforts/);
  assert.throws(()=>parseModels({models:[entry({context_window:0})]}),/positive integer/);
  assert.throws(()=>parseModels({default:'other',models:[entry()]}),/Default model other is not in the catalog/);
+});
+test('a request for a model outside the catalog gets the title model only from a desktop helper that asks for a structured answer',()=>{
+ const models=loadModels();const haiku=models.get('claude-haiku');
+ const structured={text:{format:{type:'json_schema',schema:{type:'object',properties:{description:{type:'string'}}}}}};
+ for(const source of ['thread_title','thread_description','thread_summary','commit_message','pull_request_message','commit_pull_request_message'])assert.equal(helperModelFor(structured,{thread_source:source},models),haiku);
+ for(const source of ['user','subagent','guardian_review','memory_consolidation','code_review','automation','ambient_suggestion_safety',undefined])assert.equal(helperModelFor(structured,{thread_source:source},models),null);
+ assert.equal(helperModelFor(structured,undefined,models),null);
+ assert.equal(helperModelFor({},{thread_source:'thread_description'},models),null);
+ // A catalog without a title model has no helper model.
+ const plain=parseModels({models:[{slug:'a',claude_model:'a',display_name:'A',context_window:1}]});
+ assert.equal(helperModelFor(structured,{thread_source:'thread_description'},plain),null);
 });
 test('a chat title request runs on the catalog\'s title model',()=>{
  const models=loadModels();const fable=models.get('claude-fable'),haiku=models.get('claude-haiku');

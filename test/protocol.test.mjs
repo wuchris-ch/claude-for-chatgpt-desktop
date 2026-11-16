@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {thinkingKind, visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
+import {mergeText, historyMarks, historyDifference, thinkingKind, visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
 
 test('freeform tools preserve multiline JavaScript without JSON coercion',()=>{
  const [tool]=normalizeTools([{type:'custom',name:'exec',description:'Execute JS'}]);
@@ -367,4 +367,35 @@ test('the kind of a thinking block is read from its signature, as Claude Code re
  const long=Buffer.concat([Buffer.from([0x09,1,2,3,4,5,6,7,8]),Buffer.from([0x22,0x81,0x01]),Buffer.alloc(129,7),inner('narration')]);
  assert.equal(thinkingKind(sign(field(2,long.subarray(0,0)),Buffer.from([0x12,long.length&0x7f|0x80,long.length>>7]),long)),'narration');
  for(const bad of [undefined,'',42,'not base64 at all',sign(Buffer.from([0x12,0x7f,1])),sign(field(3,inner('narration'))),sign(Buffer.from([0x0f]))])assert.equal(thinkingKind(bad),undefined);
+});
+test('neighboring text blocks become one block and images keep their place',()=>{
+ const image={type:'image',source:{type:'base64',media_type:'image/png',data:'Zm9v'}};
+ const input=[{type:'text',text:'<developer_message>'},{type:'text',text:'a rule'},{type:'text',text:'</developer_message>'},{type:'text',text:'look at this'},image,{type:'text',text:'and this'},image,image,{type:'text',text:''},{type:'text',text:'the end'}];
+ const copy=structuredClone(input);
+ assert.deepEqual(mergeText(input),[{type:'text',text:'<developer_message>\na rule\n</developer_message>\nlook at this'},image,{type:'text',text:'and this'},image,image,{type:'text',text:'the end'}]);
+ assert.deepEqual(input,copy);
+ // A block with a field of its own is left as it is.
+ const marked={type:'text',text:'kept apart',cache_control:{type:'ephemeral'}};
+ assert.deepEqual(mergeText([{type:'text',text:'a'},marked,{type:'text',text:'b'}]),[{type:'text',text:'a'},marked,{type:'text',text:'b'}]);
+ assert.deepEqual(mergeText([]),[]);
+ // Twelve developer notes and a user message: 37 blocks before, one after.
+ const many=userInput([...Array.from({length:12},(_,i)=>({type:'message',role:'developer',content:`note ${i}`})),{type:'message',role:'user',content:[{type:'input_text',text:'hi'}]}],{prefix:false});
+ assert.equal(many.length,37);assert.equal(mergeText(many).length,1);
+});
+test('history marks find the first run of items that differs, and say when only the uncovered tail can differ',()=>{
+ const user=(text,i)=>({type:'message',id:`u${i}`,role:'user',content:[{type:'input_text',text}]});
+ const call=i=>({type:'function_call',call_id:`c${i}`,name:'exec',arguments:'{}'});
+ const history=Array.from({length:20},(_,i)=>i%2?call(i):user(`message ${i}`,i));
+ const stamp=historyStamp(history),marks=historyMarks(history);
+ assert.equal(marks.length,2);assert.ok(marks.every(m=>/^[0-9a-f]{10}$/.test(m)));
+ // Developer messages and reasoning are not history, as for the stamp.
+ assert.deepEqual(historyMarks([{type:'message',role:'developer',content:'note'},...history,{type:'reasoning'}]),marks);
+ const edit=at=>history.map((x,i)=>i===at?user('edited',i):x);
+ assert.deepEqual(historyDifference(edit(3),stamp,marks),{items:20,was:20,at:0,exact:true,kinds:['message:user','function_call','message:user','message:user','message:user','function_call','message:user','function_call']});
+ assert.equal(historyDifference(edit(12),stamp,marks).at,8);
+ // Items 16 to 19 are in no full run, so the place is a lower bound.
+ assert.deepEqual(historyDifference(edit(18),stamp,marks),{items:20,was:20,at:16,exact:false,kinds:['message:user','function_call','message:user','function_call']});
+ // A shorter history, and a session saved before the marks existed.
+ assert.deepEqual(historyDifference(history.slice(0,10),stamp,marks),{items:10,was:20,at:8,exact:false,kinds:['message:user','function_call']});
+ assert.deepEqual(historyDifference(edit(3),stamp,undefined),{items:20,was:20});
 });
