@@ -81,6 +81,60 @@ class PluginIsolationTests(unittest.TestCase):
         self.assertTrue(model['supports_search_tool'])
         self.assertEqual(refresh_capabilities(self.source,self.codex)['mcp_descriptors_rewritten'],0)
 
+    def entry(self, slug, priority, version='v2', tools=('send_user_message_async','clock'), visibility='list', prompt='base'):
+        return {'slug':slug,'tool_mode':'code_mode_only','visibility':visibility,'priority':priority,'multi_agent_version':version,
+                'experimental_supported_tools':list(tools),'supports_reasoning_effort_updates':False,
+                'model_messages':{'instructions_template':'You are Codex, a coding agent.\n'+prompt}}
+
+    def cache(self, where, *models):
+        (where/'models_cache.json').write_text(json.dumps({'models':list(models)}))
+
+    def claude(self):
+        return json.loads((self.codex/'models.json').read_text())['models'][0]
+
+    def test_the_claude_models_copy_the_entry_that_turns_on_the_most_not_the_first(self):
+        # A ChatGPT account's list in November 2026: a hidden fallback model came first.
+        self.cache(self.source, self.entry('gpt-reserve',1,'v1',(),'hide'), self.entry('gpt-6-luna',2), self.entry('gpt-5.6-terra',3,'v2',()), self.entry('gpt-5.6-luna',4,'v1',()))
+        result = refresh_capabilities(self.source,self.codex)
+        self.assertEqual(result['model_template'],'gpt-6-luna')
+        claude = self.claude()
+        self.assertEqual(claude['multi_agent_version'],'v2')
+        self.assertEqual(claude['experimental_supported_tools'],['send_user_message_async','clock'])
+        # Effort changes stay in the history the engine sends, whatever the copied entry says.
+        self.assertTrue(claude['supports_reasoning_effort_updates'])
+        self.assertTrue(claude['slug'].startswith('claude-'))
+
+    def test_a_list_with_only_weaker_entries_keeps_the_last_choice(self):
+        self.cache(self.source, self.entry('gpt-6.1-sol',1,prompt='flagship'))
+        refresh_capabilities(self.source,self.codex)
+        before = (self.codex/'models.json').read_text()
+        self.cache(self.source, self.entry('gpt-reserve',1,'v1',(),'hide'), self.entry('gpt-5.6-luna',2,'v1',()))
+        result = refresh_capabilities(self.source,self.codex)
+        self.assertEqual(result['model_template'],'gpt-6.1-sol')
+        self.assertFalse(result['model_catalog_refreshed'])
+        self.assertEqual((self.codex/'models.json').read_text(),before)
+
+    def test_an_equal_entry_in_the_current_list_replaces_the_saved_one(self):
+        self.cache(self.source, self.entry('gpt-6.1-sol',1,prompt='old prompt'))
+        refresh_capabilities(self.source,self.codex)
+        self.cache(self.source, self.entry('gpt-7-sol',1,prompt='new prompt'))
+        result = refresh_capabilities(self.source,self.codex)
+        self.assertEqual(result['model_template'],'gpt-7-sol')
+        self.assertIn('new prompt',self.claude()['model_messages']['instructions_template'])
+        self.assertNotIn('You are Codex',self.claude()['model_messages']['instructions_template'])
+
+    def test_the_windows_own_list_counts_and_the_bridges_entries_are_never_copied(self):
+        # Picker mode writes Claude entries into the app's list. Another tool mode is not usable.
+        picker = self.entry('claude-fable',1); other = {**self.entry('gpt-other',1),'tool_mode':'direct'}
+        self.cache(self.source, picker, other, self.entry('gpt-reserve',2,'v1',(),'hide'))
+        self.cache(self.codex, self.entry('gpt-6.1-sol',1))
+        self.assertEqual(refresh_capabilities(self.source,self.codex)['model_template'],'gpt-6.1-sol')
+
+    def test_a_list_without_a_code_mode_entry_says_so(self):
+        self.cache(self.source, {'slug':'gpt-other','tool_mode':'direct'})
+        with self.assertRaisesRegex(RuntimeError,'No code-mode model found'):
+            refresh_capabilities(self.source,self.codex)
+
     def test_app_tools_and_existing_copies_are_repaired(self):
         package = self.package('codex-app-tools')
         dest = self.destination(package)

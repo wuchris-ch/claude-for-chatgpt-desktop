@@ -113,6 +113,21 @@ test('the model list gains the Claude entries and keeps its cache validation',as
  assert.equal(openai.seen.http[1].headers['if-none-match'],'W/"models-1"');
  assert.deepEqual(withClaudeModels([{slug:'no-template'}],loadModels()),[{slug:'no-template'}]);
 });
+test('the Claude entries copy the GPT entry that turns on the most, not the first',()=>{
+ const entry=(slug,priority,version,tools,visibility='list')=>({slug,tool_mode:'code_mode_only',visibility,priority,multi_agent_version:version,experimental_supported_tools:tools,supports_reasoning_effort_updates:false,model_messages:{instructions_template:'You are Codex, a coding agent.\n'+slug}});
+ // A ChatGPT account's list in November 2026: a hidden fallback model came first.
+ const list=[entry('gpt-reserve',1,'v1',[],'hide'),entry('gpt-6-luna',2,'v2',['send_user_message_async','clock']),entry('gpt-5.6-terra',3,'v2',[]),entry('claude-old',4,'v2',['send_user_message_async','clock'])];
+ const claude=withClaudeModels(list,loadModels()).filter(m=>m.slug.startsWith('claude-')&&m.slug!=='claude-old');
+ assert.ok(claude.length>=3);
+ for(const m of claude) {
+  assert.equal(m.multi_agent_version,'v2');assert.deepEqual(m.experimental_supported_tools,['send_user_message_async','clock']);
+  assert.equal(m.supports_reasoning_effort_updates,true);assert.match(m.model_messages.instructions_template,/gpt-6-luna$/);
+ }
+ // Equal entries: the app's own order decides.
+ const equal=[entry('gpt-b',2,'v2',['clock']),entry('gpt-a',1,'v2',['clock'])];
+ assert.match(withClaudeModels(equal,loadModels()).at(-1).model_messages.instructions_template,/gpt-a$/);
+});
+
 
 test('a new Claude version renames its entry and makes the app download the list again',async t=>{
  const {bridge,openai,base,app}=await setup(t);

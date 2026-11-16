@@ -84,8 +84,14 @@ async function compact() {
  send({type:'result',subtype:'success',is_error:false,session_id,result:'',modelUsage:{[model]:{}},permission_denials:[]});
 }
 input.on('line',async line=>{
- const msg=JSON.parse(line);const request=elideBase64(JSON.stringify(msg.message.content));
- if(msg.message.content==='/compact'){initialized=true;await compact();return;}
+ // Mirrors Claude Code 2.1.321: unless a message is marked client_composed, an
+ // @/path in its last text block is read and given to the model, and /compact
+ // is a command.
+ const msg=JSON.parse(line);const composed=msg.client_composed===true;
+ const lastText=(Array.isArray(msg.message.content)?msg.message.content:[{type:'text',text:String(msg.message.content)}]).filter(b=>b.type==='text').at(-1)?.text??'';
+ const mentioned=composed?'':[...lastText.matchAll(/(?:^|\s)@(\/\S+)/g)].map(m=>{try{return ' MENTIONED '+fs.readFileSync(m[1],'utf8').trim();}catch{return '';}}).join('');
+ const request=elideBase64(JSON.stringify(msg.message.content))+mentioned;
+ if(msg.message.content==='/compact'&&!composed){initialized=true;await compact();return;}
  if(!initialized) {
   initialized=true;
   // Claude Code 2.1.300 refuses a truncating resume before init when the dropped
@@ -109,7 +115,7 @@ input.on('line',async line=>{
  // Like Claude Code, a message sent with a uuid is confirmed once queued. A large
  // message (an image) can finish parsing after a tool result has returned.
  const confirm=()=>{if(msg.uuid&&!request.includes('never-queued'))send({type:'command_lifecycle',command_uuid:msg.uuid,state:'queued'});};
- if(busy){if(request.includes('slow-queue'))setTimeout(()=>{queued.push(msg.message.content);queuedIds.push(msg.uuid);confirm();},300);else{queued.push(msg.message.content);queuedIds.push(msg.uuid);confirm();}return;}
+ if(busy){const add=()=>{queued.push(msg.message.content);if(mentioned)queued.push(mentioned);queuedIds.push(msg.uuid);confirm();};if(request.includes('slow-queue'))setTimeout(add,300);else add();return;}
  confirm();
  if(process.argv.includes('--json-schema')) {
   // Mirrors Claude Code 2.1.280: commentary, a synthetic StructuredOutput tool call, then result.structured_output.

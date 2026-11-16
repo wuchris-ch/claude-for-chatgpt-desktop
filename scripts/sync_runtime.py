@@ -197,6 +197,55 @@ def follow_window_provider(codex, token, port=DEFAULT_PORT):
         return 0
     return move_threads(codex,provider) if provider else 0
 
+# The engine offers these tools only to a model whose catalog entry names
+# them: clock.sleep, and the question card that does not block the turn.
+TEMPLATE_TOOLS = {'clock', 'send_user_message_async', 'request_user_input_async'}
+TEMPLATE_FILE = 'bridge-model-template.json'
+
+def template_rank(model):
+    """How much of the app a catalog entry turns on, then how high the app lists it."""
+    return (model.get('multi_agent_version') == 'v2',
+            len(TEMPLATE_TOOLS & set(model.get('experimental_supported_tools') or [])),
+            model.get('visibility') != 'hide',
+            -int(model.get('priority') or 0))
+
+def pick_template(source, codex):
+    """The app's code-mode GPT entry that the Claude models copy.
+
+    The entry sets what the engine offers a model: the multi-agent version, the
+    clock and async question tools, and the base prompt. The first entry in the
+    app's list was used until November 2026, when a ChatGPT account's list began
+    with gpt-reserve, a hidden fallback model with none of these, and Claude
+    lost clock.sleep, the collaboration tools and async questions. The choice
+    is now the entry that turns on the most. The last choice is saved, so a
+    list that holds only weaker entries keeps it. An equal entry in the app's
+    current list replaces the saved one, so prompt updates still arrive.
+    """
+    source, codex = pathlib.Path(source), pathlib.Path(codex)
+    candidates = []
+    for file in (source/'models_cache.json', codex/'models_cache.json'):
+        try:
+            models = json.loads(file.read_text())['models']
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        candidates += [m for m in models if isinstance(m, dict) and m.get('tool_mode') == 'code_mode_only'
+                       and not str(m.get('slug', '')).startswith('claude-')]
+    saved = codex/TEMPLATE_FILE
+    try:
+        kept = json.loads(saved.read_text())
+        if isinstance(kept, dict) and kept.get('tool_mode') == 'code_mode_only':
+            candidates.append(kept)
+    except (OSError, ValueError):
+        pass
+    if not candidates:
+        return None
+    # max keeps the first of equal entries, and the app's current list comes first.
+    template = max(candidates, key=template_rank)
+    value = json.dumps(template, indent=2)
+    if not saved.exists() or saved.read_text() != value:
+        temp = saved.with_suffix('.json.tmp'); temp.write_text(value); temp.replace(saved)
+    return template
+
 def model_catalog(template, models, started=None):
     """Desktop catalog entries for the Claude models, built from a GPT entry."""
     started = started or {}
@@ -217,6 +266,11 @@ def model_catalog(template, models, started=None):
                      additional_speed_tiers=[], service_tiers=[], available_access_programs={'cyber':[]}, availability_nux=None,
                      context_window=window, max_context_window=window, auto_compact_token_limit=int(window*AUTO_COMPACT_SHARE),
                      support_verbosity=False, default_reasoning_summary='none', use_responses_lite=False, supports_search_tool=True,
+                     # With this on, the engine sends the items that record an effort
+                     # change inside a chat. If the copied entry turned it off, the
+                     # requests left those items out, the history no longer matched the
+                     # bridge's saved copy, and the chat was rebuilt from the transcript.
+                     supports_reasoning_effort_updates=True,
                      multi_agent_reasoning_effort=default, upgrade=None, priority=priority, visibility='list')
         messages = model.get('model_messages')
         if messages and messages.get('instructions_template'):
@@ -327,8 +381,7 @@ def refresh_capabilities(source, codex, models=None, web_search=False):
     cache = source/'models_cache.json'
     if not cache.exists():
         raise RuntimeError('ChatGPT has not downloaded its model list yet. Open the ChatGPT app once, then run this again.')
-    available = json.loads(cache.read_text())['models']
-    template = next((m for m in available if m.get('tool_mode') == 'code_mode_only'), None)
+    template = pick_template(source, codex)
     if template is None:
         raise RuntimeError('No code-mode model found in '+str(cache)+'. This ChatGPT version is not supported yet.')
     target=codex/'models.json'
@@ -338,7 +391,7 @@ def refresh_capabilities(source, codex, models=None, web_search=False):
     if model_changed:
         temp=target.with_suffix('.json.tmp');temp.write_text(value);temp.replace(target)
     search_changed=set_standalone_search(codex, web_search)
-    return {'plugins_added':copied,'mcp_descriptors_rewritten':rewritten,'model_catalog_refreshed':model_changed,'search_config_refreshed':search_changed}
+    return {'plugins_added':copied,'mcp_descriptors_rewritten':rewritten,'model_catalog_refreshed':model_changed,'model_template':template.get('slug'),'search_config_refreshed':search_changed}
 
 if __name__=='__main__':
     runtime=runtime_dir();config=load_launch(runtime)

@@ -270,7 +270,7 @@ export class Session {
   // reports the message queued keeps them together.
   steer(fresh) {
     const uuid=randomUUID();
-    this.child.stdin.write(JSON.stringify({type:'user',uuid,message:{role:'user',content:steeringPrompt(fresh)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
+    this.child.stdin.write(JSON.stringify({type:'user',uuid,client_composed:true,message:{role:'user',content:steeringPrompt(fresh)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
     this.log('user_steering',{messages:fresh.length});
     if(fresh.some(x=>x.type==='message'&&x.role==='user'))this.ack={thinking:''};
     const keys=fresh.map(inputKey);this.steers.set(uuid,keys);
@@ -395,6 +395,7 @@ export class Session {
         } catch(error){reject(error);}
       });
       child.stdin.on('error',()=>{});
+      // Not client_composed: this one is a command.
       child.stdin.write(JSON.stringify({type:'user',uuid:randomUUID(),message:{role:'user',content:'/compact'},parent_tool_use_id:null})+'\n');
     });
   }
@@ -642,7 +643,13 @@ export class Session {
       if(refused)this.relaunch(context);
     }));
     child.stdin.on('error',e=>this.fail(`Claude input closed: ${e.message}`));
-    child.stdin.write(JSON.stringify({type:'user',uuid:promptId,message:{role:'user',content:asPrompt(input)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
+    // Claude Code otherwise reads an @/path in the last text block of a message
+    // and gives the file to the model, with its own tools off and without the
+    // app's approval. A user's turn ends with the time note, so it was not read
+    // there. A message from another agent, a timer or a rebuilt transcript can
+    // end the prompt, and on Claude Code 2.1.321 a path in one was read.
+    // client_composed delivers the text as written.
+    child.stdin.write(JSON.stringify({type:'user',uuid:promptId,client_composed:true,message:{role:'user',content:asPrompt(input)},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
   }
   async relaunch(context) {
     const {imageCutoff,userImageCutoff,toolSet}=this.record;

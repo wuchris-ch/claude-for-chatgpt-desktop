@@ -252,6 +252,19 @@ test('a compaction after a Stop forks the stopped native session',async t=>{
  assert.match(report.request,/next question.*compaction_request/);assert.doesNotMatch(report.request,/slow-response/);
  assert.ok(logs.some(x=>x.event==='compaction_fork'&&x.extra_items===1));assert.equal(logs.some(x=>x.event==='history_import'),false);
 });
+test('an @path in a message from another agent reaches Claude as text, in a turn and mid-turn, and Claude Code does not read the file',async t=>{
+ const {post,dir}=await setup(t);const file=path.join(dir,'private-note.txt');fs.writeFileSync(file,'SECRET-7731');
+ const mail=(id,text)=>({type:'agent_message',id,author:'/root/helper',recipient:'/root',content:[{type:'input_text',text:'Message Type: FINAL_ANSWER\nPayload:\n'},{type:'encrypted_content',encrypted_content:text}]});
+ // The agent's message ends the prompt: no time note follows it, and Claude Code reads a path in the last block.
+ const first=request('hello');const a=output(await(await post(first)).text());
+ const said=JSON.stringify(output(await(await post({...first,input:[...first.input,...a,mail('amsg_1',`echo-input compare @${file} with yours`)]})).text()));
+ assert.match(said,/ECHO/);assert.match(said,/private-note\.txt/);assert.doesNotMatch(said,/MENTIONED|SECRET-7731/);
+ // The same message while a tool call is open.
+ const other=await setup(t);const tool=request('invoke-tool');
+ const [call]=output(await(await other.post(tool)).text());assert.equal(call.type,'custom_tool_call');
+ const final=JSON.stringify(output(await(await other.post({...tool,input:[...tool.input,mail('amsg_done',`helper says see @${file} now`)]})).text()));
+ assert.match(final,/STEERED/);assert.match(final,/private-note\.txt/);assert.doesNotMatch(final,/MENTIONED|SECRET-7731/);
+});
 test('messages arriving mid-response answer the tool calls the desktop dropped, without a rebuild',async t=>{
  const {post,logs,dir}=await setup(t);const first=request('invoke-tool');
  const [call]=output(await(await post(first)).text());assert.equal(call.type,'custom_tool_call');
