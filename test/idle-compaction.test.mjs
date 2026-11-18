@@ -89,6 +89,17 @@ test('while the cache is still warm, the next turn resumes the full conversation
  assert.equal(args(two).resume,original);assert.equal(texts(two).length,1);
  assert.ok(logs.some(x=>x.event==='idle_compaction_discarded'&&x.reason==='cache_warm'));assert.equal(s.record.idle,undefined);
 });
+test('a turn on another model cannot read the warm cache, so it starts from the summary',async t=>{
+ const {b,logs,turn,compactions}=await setup(t);const first=request('args-probe first');
+ const one=await turn(first);
+ const s=await fire(b);const [run]=compactions();assert.ok(s.record.idle);
+ const two=await turn({...first,model:'claude-fable',input:[...first.input,...one,user('args-probe second','user2')]});
+ assert.equal(args(two).resume,run.session_id);assert.equal(s.record.claudeId,run.session_id);assert.equal(s.record.idle,undefined);
+ assert.match(texts(two)[0].text,/^Compacted while idle/);
+ assert.ok(logs.some(x=>x.event==='model_switched'&&x.to==='claude-fable'));
+ assert.ok(logs.some(x=>x.event==='idle_compaction_used'&&x.cache_lost==='model'));
+ assert.equal(logs.some(x=>x.event==='idle_compaction_discarded'),false);
+});
 test('a new message during an idle compaction stops it and resumes the full conversation',async t=>{
  const {b,dir,logs,turn,compactions}=await setup(t);const first=request('args-probe first');
  const one=await turn(first);const original=claudeIdOf(b);

@@ -4,6 +4,18 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, 0.3.15 brings fixes from a verification pass of the whole project, 0.3.16 reads chats with hundreds of megabytes of screenshots, 0.3.17 trims the screenshots a compaction keeps, 0.3.18 counts images at the size Claude Code sends, 0.3.19 moves the separate window's earlier chats to its provider, 0.3.20 has Claude answer a mid-turn question when it arrives, 0.3.21 shows the progress Claude writes in its thinking, 0.3.22 marks the messages a compaction kept between turns as earlier turns, 0.3.23 compacts idle chats before the prompt cache expires, 0.3.24 tells Claude that the app folds its progress notes when a turn ends, 0.3.25 starts Claude Fable 5.2, 0.3.26 starts a turn again when a message arrives before Claude's first word, 0.3.27 runs chat titles on Haiku, 0.3.28 ends a flagged message with a plain note instead of a retry on an older model, and 0.3.29 copies the most capable GPT entry for the Claude models and sends every message to Claude Code as written. The newest checks come first.
 
+## Release 0.3.31, checked November 18, 2026
+
+### A model change after an idle compaction
+
+A summary written while a chat was idle replaces the conversation only after the cache it was read from has expired (0.3.23). The check looked only at the time. A prompt cache belongs to one model, so a turn on another Claude model starts with no cache whatever the time.
+
+On November 18, 2026 the bridge compacted an idle chat from 270,494 to 4,771 tokens. The chat continued on another model 55 minutes later. The log shows `model_switched` and then `idle_compaction_discarded` with the reason `cache_warm`, and the new model wrote the full conversation to its own cache.
+
+The turn now compares its model with the model of the session's last turn. When they differ, it starts from the summary at once, and `idle_compaction_used` carries `cache_lost: "model"`. A turn on the same model behaves as before. A chat below the 200K threshold has no summary, so a model change there still sends the full conversation.
+
+A test in `test/idle-compaction.test.mjs` runs a turn on another model while the summary's cache is still warm. It resumes the compacted fork and shows the "Compacted while idle" line. It fails without the change.
+
 ## Release 0.3.30, checked November 16, 2026
 
 ### Desktop helpers that name an OpenAI model

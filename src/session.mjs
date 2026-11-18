@@ -577,7 +577,8 @@ export class Session {
     const effort=fork?fork.effort:effortFor(runModel,body.reasoning?.effort);
     // Switching Claude models between turns resumes the same native session
     // on the new model. Its first request cannot reuse the old model's cache.
-    if(!fork&&(this.record.started||this.resumeItems)&&this.record.model&&this.record.model!==runModel.slug)this.log('model_switched',{from:this.record.model,to:runModel.slug});
+    const previous=this.record.model;
+    if(!fork&&(this.record.started||this.resumeItems)&&previous&&previous!==runModel.slug)this.log('model_switched',{from:previous,to:runModel.slug});
     const systemFile=path.join(this.bridge.stateDir,`${this.id}.system.txt`);
     fs.writeFileSync(systemFile,fork?.prompt??prompt,{mode:0o600});
     const mcpFile=this.writeMcpConfig();
@@ -589,15 +590,18 @@ export class Session {
     const truncate=this.truncate;this.truncate=null;
     // A summary written while the thread was idle replaces the conversation
     // only once the cache it was written from has expired. Until then the
-    // full conversation costs no more to resume.
+    // full conversation costs no more to resume. Another model cannot read
+    // that cache, so its turn starts from the summary at once: a chat that
+    // changed model 55 minutes after its summary wrote 270k tokens again.
     const idle=!fork&&this.record.idle;let summary=null;
     if(idle) {
       delete this.record.idle;
-      const reason=this.resumeItems||truncate||!this.record.started||idle.cacheAt!==this.record.cacheAt?'session_changed':Date.now()-idle.at<=CACHE_TTL_MS?'cache_warm':null;
+      const cacheLost=!!previous&&previous!==runModel.slug;
+      const reason=this.resumeItems||truncate||!this.record.started||idle.cacheAt!==this.record.cacheAt?'session_changed':!cacheLost&&Date.now()-idle.at<=CACHE_TTL_MS?'cache_warm':null;
       if(reason)this.log('idle_compaction_discarded',{reason});
       else {
         summary=idle;this.record.claudeId=idle.claudeId;this.record.turnEnd=null;
-        this.log('idle_compaction_used',{before:idle.before,after:idle.after,idle_minutes:Math.round((Date.now()-idle.cacheAt)/60000)});
+        this.log('idle_compaction_used',{before:idle.before,after:idle.after,idle_minutes:Math.round((Date.now()-idle.cacheAt)/60000),...(cacheLost?{cache_lost:'model'}:{})});
       }
     }
     const args=[...claudeArgs(runModel.claude_model,effort,mcpFile,systemFile),'--include-partial-messages','--disable-slash-commands',
