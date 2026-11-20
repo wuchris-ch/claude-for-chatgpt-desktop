@@ -4,6 +4,21 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, 0.3.15 brings fixes from a verification pass of the whole project, 0.3.16 reads chats with hundreds of megabytes of screenshots, 0.3.17 trims the screenshots a compaction keeps, 0.3.18 counts images at the size Claude Code sends, 0.3.19 moves the separate window's earlier chats to its provider, 0.3.20 has Claude answer a mid-turn question when it arrives, 0.3.21 shows the progress Claude writes in its thinking, 0.3.22 marks the messages a compaction kept between turns as earlier turns, 0.3.23 compacts idle chats before the prompt cache expires, 0.3.24 tells Claude that the app folds its progress notes when a turn ends, 0.3.25 starts Claude Fable 5.2, 0.3.26 starts a turn again when a message arrives before Claude's first word, 0.3.27 runs chat titles on Haiku, 0.3.28 ends a flagged message with a plain note instead of a retry on an older model, and 0.3.29 copies the most capable GPT entry for the Claude models and sends every message to Claude Code as written. The newest checks come first.
 
+## Release 0.3.32, checked November 20, 2026
+
+### Chat titles that got no reply
+
+The app asks for a chat's title beside the chat's first turn and waits 30 seconds. A chat it gives up on keeps a title cut from its first message.
+
+In the separate-window bridge's log, the app gave up on 2 of the 32 title requests from November 1 to 20, both on November 20. In each, Claude Code 2.1.321 reported init within 0.8 s, and its transcript shows the request to Haiku sent 0.02 s later. No reply started in the next 29 s. Claude Code reported no error and no retry, and the status page listed no incident. Other models answered in about 1 s in the same seconds, and three direct Haiku requests 40 minutes later took 2.8 to 4.0 s.
+
+A third title request took 20 s for another reason. The app sends the chat's tools with a title request, and Haiku ran three host commands before it wrote the title: a web search, a list of the tools and a `curl`. It is the only one of the 32 that called a tool.
+
+- **No tools.** A title request reaches the model with an empty tool list. Its `request` log line shows `tools: 0`.
+- **One restart.** When a title request has no reply 12 seconds after init, the bridge logs `title_stalled`, stops Claude Code and starts the request again in a new session (`title_retry`), once. The wait starts at init, so a slow start of Claude Code is not counted. `titleStallMs` in `startBridge` sets the wait, and 0 turns it off.
+
+A chat's own turn is never restarted this way. An integration test covers both changes and checks that a chat's turn with the same silence is not restarted. It fails without the change.
+
 ## Release 0.3.31, checked November 18, 2026
 
 ### A model change after an idle compaction

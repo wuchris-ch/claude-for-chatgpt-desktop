@@ -8,7 +8,7 @@ import {zstdDecompressSync, gunzipSync, inflateSync} from 'node:zlib';
 import {Session, idleEligible} from './session.mjs';
 import {createSearchHandler, pickerSearch} from './search.mjs';
 import {createGateway, gatewayPath, BRIDGE_CHECKPOINT, GATEWAY_UPSTREAM} from './gateway.mjs';
-import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, runModelFor, helperModelFor, outputSchema, ResponseStream} from './protocol.mjs';
+import {digest, openCheckpoint, sealCheckpoint, checkpointText, validateRequestOptions, runModelFor, helperModelFor, isTitleRequest, outputSchema, ResponseStream} from './protocol.mjs';
 import {loadModels, effortFor, labelFor} from './models.mjs';
 import {parseJson, MAX_REQUEST_BYTES} from './large-json.mjs';
 const VERSION=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8')).version;
@@ -149,7 +149,7 @@ export function pruneToolSets(directory,now=Date.now()) {
 // reads Claude Code's credentials.
 // gatewayKey turns on picker mode, where the app's own OpenAI provider is
 // pointed at /g/<gatewayKey>/backend-api/codex (see gateway.mjs).
-export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000,exitGraceMs=15000,initWaitMs=10000,idleCompaction={}}) {
+export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,models=loadModels(),auth={mode:'claude_login'},webSearch=false,gatewayKey=null,gatewayUpstream=GATEWAY_UPSTREAM,log=()=>{},searchUpstream,searchTimeoutMs,sleepGraceMs=300000,toolWaitMs=7200000,exitGraceMs=15000,initWaitMs=10000,titleStallMs=12000,idleCompaction={}}) {
   if(!AUTH_MODES.includes(auth?.mode))throw new Error(`Unknown auth mode ${auth?.mode}. Use one of: ${AUTH_MODES.join(', ')}.`);
   if(auth.mode==='api_key'&&typeof auth.apiKey!=='function')throw new Error('API key mode needs an apiKey function.');
   // Claude Code runs in claudeCwd and is handed files under stateDir, so a
@@ -163,7 +163,7 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
   const cacheTimer=setInterval(()=>{try{pruneResponseCache(cacheDir);pruneToolSets(toolSetDir);}catch(error){log('cache_cleanup_error',{message:error.message});}},900000);cacheTimer.unref();
   // resolvedModels maps a catalog slug to the model Claude Code last started
   // for it, so later processes pin aliases to the same version.
-  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,searchUpstream,searchTimeoutMs,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,exitGraceMs,initWaitMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
+  const bridge={stateDir,token,claudeCwd,log,auth,models,webSearch:!!webSearch,searchUpstream,searchTimeoutMs,resolvedModels:new Map(),sleepGraceMs,toolWaitMs,exitGraceMs,initWaitMs,titleStallMs,sessions:new Map(),url:`http://127.0.0.1:${port}`};
   // startedModels keeps the same record across restarts, for the names the
   // picker shows only. Pinning starts empty, so an alias still follows Claude
   // Code to a new release after a restart.
@@ -242,6 +242,11 @@ export async function startBridge({stateDir,token,port=DEFAULT_PORT,claude=null,
     // A chat title runs on the catalog's title model. The response names
     // the model the desktop asked for.
     const model=kind==='compaction'?asked:runModelFor(body,asked,models);
+    // A title is written from the chat's first message and needs no tools.
+    // The app sends the chat's tools with the request, and on November 20,
+    // 2026 Haiku ran three host commands (a web search, a tool list and a
+    // curl) before it wrote a title, 20 of the 30 s the app waits.
+    if(kind!=='compaction'&&isTitleRequest(body)){body.tools=[];body.__bridge_title=true;}
     effortFor(model,body.reasoning?.effort);
     const thread=req.headers['thread-id']??req.headers['session-id']??req.headers.session_id??body.prompt_cache_key;
     if(!thread)return json(res,400,{error:{message:'A stable desktop thread identifier is required.'}});

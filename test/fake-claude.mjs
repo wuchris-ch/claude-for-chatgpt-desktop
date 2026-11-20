@@ -111,6 +111,9 @@ input.on('line',async line=>{
   send({type:'system',subtype:'init',model,tools:['mcp__chatgpt__exec'],mcp_servers:[{name:'chatgpt',status:'connected'}]});
   if(process.argv.includes('--resume-session-at')){text('TRUNCATED '+JSON.stringify({resume:arg('--resume'),at:arg('--resume-session-at'),drops:arg('--resume-drops-turn'),request}));return;}
  }
+ // A request the API never answers, the first time only: Claude Code reports init and then nothing.
+ const stalledFile=path.join(path.dirname(arg('--system-prompt-file')),'fake-stalled');
+ if(request.includes('stall-once')&&!fs.existsSync(stalledFile)){fs.writeFileSync(stalledFile,'1');return;}
  if(request.includes('linger-after-turn'))linger=true;
  // Like Claude Code, a message sent with a uuid is confirmed once queued. A large
  // message (an image) can finish parsing after a tool result has returned.

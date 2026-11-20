@@ -623,7 +623,7 @@ export class Session {
     this.child=spawn(this.bridge.claude,args,{cwd:this.bridge.claudeCwd,env,stdio:['pipe','pipe','pipe']});
     this.stopping=false;
     const child=this.child;this.stderr='';this.nativeCalls=[];this.ready=false;this.forked=!!fork;
-    this.steers.clear();this.ack=null;this.deferredStop=null;this.lastAssistant=null;this.apiError=null;this.refusal=null;this.truncating=!!truncate;
+    this.steers.clear();this.ack=null;this.deferredStop=null;this.lastAssistant=null;this.apiError=null;this.refusal=null;this.truncating=!!truncate;this.apiStarted=false;this.titleStalled=false;
     // Where a withdrawn turn returns to: the end of the last completed turn.
     // A truncating resume keeps the same point.
     if(!truncate)this.record.settled=!fork&&this.record.started&&!this.record.inflight&&this.record.turnEnd?{history:this.record.history,at:this.record.turnEnd}:null;
@@ -647,7 +647,10 @@ export class Session {
       // Claude Code refused to drop the withdrawn turn, or ended before init:
       // this request rebuilds instead.
       const refused=!!truncate&&!this.ready&&!this.stopping&&this.stream===activeStream&&!activeStream.finished;
+      // A title request the bridge stopped because no reply had started.
+      const stalled=this.titleStalled&&this.stream===activeStream&&!activeStream.finished;
       if(refused)this.log('withdrawn_turn_refused',{code,signal,message:(this.refusal||this.stderr).slice(0,300)});
+      else if(stalled);
       else if(this.stream&&!this.stream.finished)this.fail(`Claude Code exited before completion (${code??signal}). ${this.stderr}`);
       // Claude Code exited on its own while the host ran a tool: 2 of 3 turns
       // cut off by a restart in the separate-window bridge's log, where the
@@ -657,7 +660,24 @@ export class Session {
       this.log('claude_exit',{code,signal});
       this.exiting=null;this.lastUsed=Date.now();resolve();
       if(refused)this.relaunch(context);
+      if(stalled)this.relaunch(context,'title_retry');
     }));
+    // The app waits 30 s for a chat's title and then keeps a title cut from
+    // the first message. On November 20, 2026 two title requests in a row got
+    // no reply from Haiku in that time: Claude Code had sent each request at
+    // once and reported no error or retry, and Haiku answered other requests
+    // in 3 s that hour. A title request has no history, so one with no reply
+    // yet is started again, once. The wait starts at init, when Claude Code
+    // sends the request: a slow start is not a stalled reply.
+    this.onReady=null;
+    if(body.__bridge_title&&!context.titleRetried&&this.bridge.titleStallMs>0)this.onReady=()=>{
+      const timer=setTimeout(()=>{
+        if(this.child!==child||this.apiStarted||this.stopping||this.stream!==activeStream||activeStream.finished)return;
+        this.log('title_stalled',{waited_ms:this.bridge.titleStallMs,model:runModel.slug});
+        context.titleRetried=true;this.titleStalled=true;this.stopChild('SIGTERM');
+      },this.bridge.titleStallMs);timer.unref();
+      this.childDone.finally(()=>clearTimeout(timer));
+    };
     child.stdin.on('error',e=>this.fail(`Claude input closed: ${e.message}`));
     // Claude Code otherwise reads an @/path in the last text block of a message
     // and gives the file to the model, with its own tools off and without the
@@ -667,10 +687,10 @@ export class Session {
     // client_composed delivers the text as written.
     child.stdin.write(JSON.stringify({type:'user',uuid:promptId,client_composed:true,message:{role:'user',content:mergeText(asPrompt(input))},session_id:this.record.claudeId,parent_tool_use_id:null})+'\n');
   }
-  async relaunch(context) {
+  async relaunch(context,reason='interrupted_turn_recovery') {
     const {imageCutoff,userImageCutoff,toolSet}=this.record;
     try {
-      await this.reset('interrupted_turn_recovery');
+      await this.reset(reason);
       Object.assign(this.record,{imageCutoff,userImageCutoff,toolSet});
       if(this.stream===context.activeStream&&!context.activeStream.finished)await this.launch(context);
     } catch(error){if(this.stream===context.activeStream)this.fail(error.message);}
@@ -704,6 +724,7 @@ export class Session {
       // Claude Code reports init only after it has recorded the turn's input.
       this.ready=!this.forked;
       this.log('claude_ready',{model:msg.model,tools:msg.tools});
+      const armed=this.onReady;this.onReady=null;armed?.();
     }
     if(msg.type==='assistant') {
       if(msg.message.model!=='<synthetic>'&&msg.message.model!==this.activeModel)throw modelChanged(msg.message.model,this.activeModel);
@@ -734,6 +755,7 @@ export class Session {
       const e=msg.event;
       if(e.type==='content_block_start')this.record.answered=true;
       if(e.type==='message_start') {
+        this.apiStarted=true;
         this.messageCount=(this.messageCount??0)+1;
         this.currentText=null;this.stopReason=null;if(this.ack)this.ack.thinking='';this.thoughts=new Map();
         // Only the last message of a compaction is the checkpoint.

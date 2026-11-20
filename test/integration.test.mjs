@@ -634,6 +634,24 @@ test('a desktop helper that asks for an OpenAI model runs on Haiku, and other re
   [['gpt-6-luna','thread_description',false],['gpt-6-luna',undefined,true],['gpt-6-luna','user',true],['gpt-6-luna','code_review',true],['codex-auto-review','guardian_review',true]]);
  assert.equal(logs.some(x=>x.event==='request_error'||x.event==='error'),false);
 });
+test('a title request runs with no tools, and one that gets no reply is started again once',async t=>{
+ const {post,logs,dir}=await setup(t,{titleStallMs:150});
+ const schema={type:'object',properties:{title:{type:'string'}},required:['title'],additionalProperties:false};
+ const title={...request('stall-once name this chat'),model:'claude-fable',reasoning:{effort:'low'},text:{format:{type:'json_schema',name:'title',strict:true,schema}}};
+ assert.ok(title.tools.length);
+ const a=await(await post(title,{headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':'title-thread'}})).text();
+ assert.match(JSON.stringify(output(a)),/Fixture title/);
+ // The app sends the chat's tools with a title request. None reach the model.
+ assert.equal(logs.find(x=>x.event==='request').tools,0);
+ assert.deepEqual(logs.filter(x=>x.event==='title_stalled').map(x=>[x.waited_ms,x.model]),[[150,'claude-haiku']]);
+ assert.equal(logs.filter(x=>x.event==='title_retry').length,1);assert.equal(logs.filter(x=>x.event==='claude_start').length,2);
+ assert.equal(logs.filter(x=>x.event==='turn_complete').length,1);assert.deepEqual(logs.filter(x=>x.event==='error'),[]);
+ // A second stall is left to the app's own limit, and a chat's turn is never restarted.
+ fs.rmSync(path.join(dir,'fake-stalled'));
+ const abort=new AbortController();const turn=post({...request('stall-once hello'),model:'claude-fable'},{signal:abort.signal}).then(r=>r.text()).catch(()=>null);
+ await new Promise(r=>setTimeout(r,500));abort.abort();await turn;
+ assert.equal(logs.filter(x=>x.event==='title_stalled').length,1);assert.equal(logs.filter(x=>x.event==='claude_start').length,3);
+});
 test('a chat title request runs on Haiku, and its response names the model the desktop asked for',async t=>{
  const {post,logs}=await setup(t);const thread=id=>({headers:{Authorization:'Bearer fixture-secret','Content-Type':'application/json','thread-id':id}});
  const schema={$schema:'https://json-schema.org/draft/2020-12/schema',type:'object',properties:{title:{type:'string',minLength:1,maxLength:60},description:{type:'string',minLength:1}},required:['title','description'],additionalProperties:false};
