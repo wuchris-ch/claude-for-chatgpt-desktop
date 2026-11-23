@@ -363,6 +363,19 @@ test('a summary of prose Claude wrote in its thinking is shown as commentary, an
  assert.match(JSON.stringify(next),/after/);
  assert.equal(logs.some(x=>['history_import','history_branch_rebuilt','regeneration_rebuilt','error'].includes(x.event)),false);
 });
+test('a browser completion directive that opens the answer reaches the desktop as a commentary message of its own, and the session resumes',async t=>{
+ const {post,logs}=await setup(t);const first=request('browser-done');
+ const body=await(await post(first)).text();const out=output(body);
+ assert.deepEqual(out.map(x=>[x.type,x.phase,x.content[0].text]),[['message','commentary','::browser-complete{title="Posted two replies"}'],['message','final_answer','I posted both replies.\n\n- One\n- Two']]);
+ // Each message's deltas add up to its text, and the directive's message is done before the answer begins.
+ const all=events(body);
+ for(const item of out)assert.equal(all.filter(e=>e.type==='response.output_text.delta'&&e.item_id===item.id).map(e=>e.delta).join(''),item.content[0].text);
+ assert.ok(all.findIndex(e=>e.type==='response.output_item.done'&&e.item.id===out[0].id)<all.findIndex(e=>e.type==='response.output_item.added'&&e.item.id===out[1].id));
+ // The desktop sends both messages back, and the session resumes.
+ const next=output(await(await post({...first,input:[...first.input,...out,...request('echo-input after','user2').input]})).text());
+ assert.match(JSON.stringify(next),/after/);
+ assert.equal(logs.some(x=>['history_import','history_branch_rebuilt','regeneration_rebuilt','error'].includes(x.event)),false);
+});
 test('a compaction checkpoint leaves out the summary of prose Claude wrote in its thinking',async t=>{
  const {post}=await setup(t);const first=request('hello');
  const answer=output(await(await post(first)).text());

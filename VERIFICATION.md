@@ -4,6 +4,20 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, 0.3.15 brings fixes from a verification pass of the whole project, 0.3.16 reads chats with hundreds of megabytes of screenshots, 0.3.17 trims the screenshots a compaction keeps, 0.3.18 counts images at the size Claude Code sends, 0.3.19 moves the separate window's earlier chats to its provider, 0.3.20 has Claude answer a mid-turn question when it arrives, 0.3.21 shows the progress Claude writes in its thinking, 0.3.22 marks the messages a compaction kept between turns as earlier turns, 0.3.23 compacts idle chats before the prompt cache expires, 0.3.24 tells Claude that the app folds its progress notes when a turn ends, 0.3.25 starts Claude Fable 5.2, 0.3.26 starts a turn again when a message arrives before Claude's first word, 0.3.27 runs chat titles on Haiku, 0.3.28 ends a flagged message with a plain note instead of a retry on an older model, and 0.3.29 copies the most capable GPT entry for the Claude models and sends every message to Claude Code as written. The newest checks come first.
 
+## Release 0.3.33, checked November 22, 2026
+
+### The browser completion directive
+
+ChatGPT desktop 26.1117 changed how the model reports the end of the browser part of a task. Version 26.1111 asked for a `cua_repl.js` call with only `completion_summary`. Version 26.1117 asks for text: the model's next output item must be "a standalone assistant commentary message containing only `::browser-complete{title="<headline>"}`", followed in the same response by the next tool call or the final answer. The instruction is in the `cua_repl.js` tool description of the app's `unified-computer-use` plugin.
+
+The app's code accepts the directive only when the message's phase is `commentary` and the directive is the whole text of the message. It then hides the message and shows a completion card with the title. In any other message the line is shown as text.
+
+In the separate-window bridge, Claude Code's transcripts hold five directives from November 21 to 23, 2026 (UTC). Two were alone in a text block before a tool call, and the app read them. Three were the first line of the final answer, with the answer after a blank line. The bridge sent each of those as one `final_answer` message, and the app showed the line above the answer.
+
+`CompletionLines` in `src/protocol.mjs` reads each message's text by line as it streams. A line that is exactly the directive, outside a code block, ends the message before it as commentary, goes out as a commentary message of its own, and the text after it starts a new message at its first word. That last message is the final answer when the block ends the turn. Only a line that may still turn out to be the directive is held back, until it ends. A reply with no directive is sent unchanged.
+
+A unit test runs 13 texts through `ResponseStream` in pieces of 1, 2, 3, 7, 19 and 1,000 characters and checks each message's phase and text. An integration test has the fixture write the directive as the first line of its answer: the app gets a commentary message with only the directive and then the answer, and the next turn resumes the session without a rebuild. It fails without the change.
+
 ## Release 0.3.32, checked November 20, 2026
 
 ### Chat titles that got no reply

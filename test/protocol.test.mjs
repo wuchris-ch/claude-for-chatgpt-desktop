@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {mergeText, historyMarks, historyDifference, thinkingKind, visualizeLine, VisualizeLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
+import {mergeText, historyMarks, historyDifference, thinkingKind, visualizeLine, VisualizeLines, CompletionLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
 
 test('freeform tools preserve multiline JavaScript without JSON coercion',()=>{
  const [tool]=normalizeTools([{type:'custom',name:'exec',description:'Execute JS'}]);
@@ -398,4 +398,47 @@ test('history marks find the first run of items that differs, and say when only 
  // A shorter history, and a session saved before the marks existed.
  assert.deepEqual(historyDifference(history.slice(0,10),stamp,marks),{items:10,was:20,at:8,exact:false,kinds:['message:user','function_call']});
  assert.deepEqual(historyDifference(edit(3),stamp,undefined),{items:20,was:20});
+});
+
+test('a line that is the browser completion directive becomes a commentary message of its own',()=>{
+ const D='::browser-complete{title="Posted two replies to Mark"}';
+ // What the desktop got for a text block, with the text arriving in pieces of every size.
+ const run=(text,final,size)=>{
+  const res=new EventEmitter();res.writeHead=()=>{};res.write=x=>(res.chunks??=[]).push(x);res.end=()=>{};
+  const s=new ResponseStream(res);const i=s.startText();
+  for(let n=0;n<text.length;n+=size)s.text(i,text.slice(n,n+size));
+  s.finishText(i,final);s.complete();
+  const events=res.chunks.join('').split('\n').filter(x=>x.startsWith('data: ')).map(x=>JSON.parse(x.slice(6)));
+  for(const [index,item] of s.output.entries()) {
+   assert.equal(item.status,'completed');
+   assert.equal(events.filter(e=>e.type==='response.output_text.delta'&&e.output_index===index).map(e=>e.delta).join(''),item.content[0].text);
+   assert.equal(events.filter(e=>e.type==='response.output_item.done'&&e.output_index===index).length,1);
+  }
+  return s.output.map(x=>[x.phase,x.content[0].text]);
+ };
+ const cases=[
+  // The first line of the answer: November 22, 2026.
+  [`${D}\n\nI posted both replies.\n\n- One`,true,[['commentary',D],['final_answer','I posted both replies.\n\n- One']]],
+  // Alone before a tool call, which the desktop already read.
+  [D,false,[['commentary',D]]],
+  [`${D}\n`,false,[['commentary',D]]],
+  // After a progress line, and with the answer after it.
+  [`Both comments are saved.\n\n${D}`,false,[['commentary','Both comments are saved.\n\n'],['commentary',D]]],
+  [`Both comments are saved.\n\n${D}\n\nDone.`,true,[['commentary','Both comments are saved.\n\n'],['commentary',D],['final_answer','Done.']]],
+  [`\n\n  ${D}  \nDone.`,true,[['commentary',D],['final_answer','Done.']]],
+  // The directive alone ends the turn with no answer text.
+  [D,true,[['commentary',D]]],
+  // Not the whole line, in a code block, or not the directive: the text stays as written.
+  [`See ${D} here.`,true,[['final_answer',`See ${D} here.`]]],
+  [`The line is:\n\n\`\`\`\n${D}\n\`\`\`\nDone.`,true,[['final_answer',`The line is:\n\n\`\`\`\n${D}\n\`\`\`\nDone.`]]],
+  ['::browser-complete\n::browser-completed{title="x"}\n::other{a="b"}\n: a\n::',true,[['final_answer','::browser-complete\n::browser-completed{title="x"}\n::other{a="b"}\n: a\n::']]],
+  ['\n\n  Indented.\n\nNext.  \n',true,[['final_answer','\n\n  Indented.\n\nNext.  \n']]],
+  ['  \n',false,[['commentary','  \n']]],
+  ['',true,[['final_answer','']]],
+ ];
+ for(const [text,final,expected] of cases)for(const size of [1,2,3,7,19,1000])assert.deepEqual(run(text,final,size),expected,JSON.stringify([text,size]));
+ // Text that cannot start the directive is not held back.
+ const lines=new CompletionLines();
+ assert.deepEqual(lines.push('Working on '),['Working on ']);assert.deepEqual(lines.push('it.\n::brow'),['it.\n']);assert.deepEqual(lines.push('se the page'),['::browse the page']);
+ assert.deepEqual(lines.push(`\n${D}`),['\n']);assert.deepEqual(lines.end(),[{directive:D}]);
 });

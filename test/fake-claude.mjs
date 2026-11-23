@@ -145,6 +145,14 @@ input.on('line',async line=>{
   text('GOAL '+JSON.stringify(result));return;
  }
  if(request.includes('echo-input')){text('ECHO '+request);return;}
+ // The desktop's computer-use directive, written the way Claude writes it: as
+ // the first line of the answer, in pieces that split it anywhere.
+ if(request.includes('browser-done')) {
+  const value='::browser-complete{title="Posted two replies"}\n\nI posted both replies.\n\n- One\n- Two';
+  start();event({type:'content_block_start',index:0,content_block:{type:'text',text:''}});
+  for(let n=0;n<value.length;n+=5)event({type:'content_block_delta',index:0,delta:{type:'text_delta',text:value.slice(n,n+5)}});
+  assistant([{type:'text',text:value}]);finish();return;
+ }
  // Stands in for a long think: no stream events at all until the answer.
  if(request.includes('silent-think')){setTimeout(()=>text('AWAKE'),Number(/silent-think-(\d+)/.exec(request)?.[1]??1000));return;}
  if(request.includes('env-probe')){text('ENV '+process.env.MCP_TOOL_TIMEOUT+' '+process.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH+' idle:'+process.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT+' output:'+process.env.MAX_MCP_OUTPUT_TOKENS+' size:'+listed.tools[0]?._meta?.['anthropic/maxResultSizeChars']+' ttl:'+process.env.CLAUDE_CODE_PROMPT_CACHE_TTL+' discovery:'+process.env.MCP_DISCOVERY_CACHE+' token:'+(process.env.CLAUDE_CODE_OAUTH_TOKEN??'none'));return;}

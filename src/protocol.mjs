@@ -748,6 +748,43 @@ export class VisualizeLines {
   }
 }
 
+// The desktop's computer-use tool tells the model to end the browser part of
+// a task with a commentary message that holds only
+// ::browser-complete{title="..."}. The desktop (26.1117) hides that message
+// and shows a completion card with the title; anywhere else it shows the line
+// as text. Claude writes the line and the answer in one text block: from
+// November 21 to 23, 2026 (UTC) three of five directives were the first line
+// of the final answer and the desktop showed them as written. A line of Claude's text
+// that is exactly the directive is sent as a commentary message of its own.
+// Lines in code blocks stay as written.
+const COMPLETION='::browser-complete{';
+const completionLine=line=>/^::browser-complete\{.*\}$/.test(line.trim());
+// Splits one message's text into strings and {directive} parts, holding back
+// only a line that may still turn out to be the directive until it ends.
+export class CompletionLines {
+  line='';open=true;fence=null;
+  push(delta) {
+    const parts=[];let out='';
+    for(const ch of delta) {
+      if(ch==='\n') {
+        const line=this.line,open=this.open,fence=this.fence;this.line='';this.open=true;this.fence=fenceAfter(fence,line);
+        if(open&&!fence&&completionLine(line)){if(out)parts.push(out);out='';parts.push({directive:line.trim()});continue;}
+        out+=(open?line:'')+'\n';continue;
+      }
+      this.line+=ch;
+      if(!this.open){out+=ch;continue;}
+      const start=this.line.trimStart();
+      if(this.fence||!(COMPLETION.startsWith(start)||start.startsWith(COMPLETION))){this.open=false;out+=this.line;}
+    }
+    if(out)parts.push(out);
+    return parts;
+  }
+  end() {
+    const line=this.line,open=this.open;this.line='';this.open=true;
+    return !open||!line?[]:!this.fence&&completionLine(line)?[{directive:line.trim()}]:[line];
+  }
+}
+
 export const KEEPALIVE_MS = 10000;
 export class ResponseStream {
   constructor(res, model) {
@@ -774,9 +811,34 @@ export class ResponseStream {
     this.send('response.content_part.added', {item_id: item.id, output_index: index, content_index: 0, part});
     return index;
   }
+  // The caller keeps the index startText gave it. A completion directive in
+  // the text ends that message and the rest goes to a new one, so each index
+  // has the message its text is going to now (item; null until the text
+  // after a directive begins).
   text(index, delta) {
-    if(!this.lines.has(index))this.lines.set(index,new VisualizeLines());
-    this.emit(index,this.lines.get(index).push(delta));
+    if(!this.lines.has(index))this.lines.set(index,{visualize:new VisualizeLines(),completion:new CompletionLines(),item:index,blank:''});
+    const state=this.lines.get(index);this.write(state,state.completion.push(state.visualize.push(delta)));
+  }
+  write(state, parts) {
+    for(const part of parts) {
+      const begun=state.item!=null&&this.output[state.item].content[0].text!=='';
+      if(typeof part!=='string') {
+        // The desktop reads the directive only in a message that holds
+        // nothing else, so the text before it ends as commentary.
+        if(begun){this.closeText(state.item,false);state.item=null;}
+        const i=state.item??this.startText();this.emit(i,part.directive);this.closeText(i,false);state.item=null;state.blank='';
+        continue;
+      }
+      if(begun){this.emit(state.item,part);continue;}
+      // Blank text that opens a message waits for what follows it: a
+      // directive must be the whole of its message, and the message after one
+      // starts at its first word.
+      const text=state.blank+part;
+      if(!text.trim()){state.blank=text;continue;}
+      state.blank='';
+      if(state.item==null){state.item=this.startText();this.emit(state.item,text.trimStart());}
+      else this.emit(state.item,text);
+    }
   }
   emit(index, delta) {
     if(!delta)return;
@@ -784,7 +846,14 @@ export class ResponseStream {
     this.send('response.output_text.delta', {item_id: item.id, output_index: index, content_index: 0, delta});
   }
   finishText(index, final) {
-    this.emit(index,this.lines.get(index)?.end());this.lines.delete(index);
+    const state=this.lines.get(index);this.lines.delete(index);
+    if(!state)return this.closeText(index,final);
+    this.write(state,state.completion.push(state.visualize.end()));this.write(state,state.completion.end());
+    // Text that ended with a directive has no message left to close.
+    if(state.item==null)return;
+    this.emit(state.item,state.blank);this.closeText(state.item,final);
+  }
+  closeText(index, final) {
     const item = this.output[index]; item.status = 'completed'; item.phase = final ? 'final_answer' : 'commentary';
     this.send('response.output_text.done', {item_id: item.id, output_index: index, content_index: 0, text: item.content[0].text});
     this.send('response.content_part.done', {item_id: item.id, output_index: index, content_index: 0, part: item.content[0]});
