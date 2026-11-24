@@ -206,6 +206,9 @@ input.on('line',async line=>{
   text('RESULTS '+JSON.stringify(results));return;
  }
  if(request.includes('compaction_request')) {
+  // What Claude Code 2.1.321 answers when the session with this request no longer fits the window.
+  const tooLong=path.join(path.dirname(arg('--system-prompt-file')),'fake-fork-too-long');
+  if(fs.existsSync(tooLong)){fs.appendFileSync(tooLong,'x');send({type:'assistant',error:'invalid_request',message:{model:'<synthetic>',content:[{type:'text',text:'Prompt is too long'}]}});send({type:'result',subtype:'success',is_error:true,result:'Prompt is too long',modelUsage:{},permission_denials:[]});return;}
   const report=extra=>text('FORK '+JSON.stringify({fork:process.argv.includes('--fork-session'),resume:arg('--resume'),model,effort:process.argv.includes('--effort')?arg('--effort'):null,tools:listed.tools.map(t=>t.name),prompt:fs.readFileSync(arg('--system-prompt-file'),'utf8').slice(0,40),request:request.slice(0,4000),caching:process.env.DISABLE_PROMPT_CACHING?'off':'on',...extra}));
   // A summary of prose Claude wrote in its thinking, in the checkpoint's own message.
   if(request.includes('narrate')){const value='FORK '+JSON.stringify({request:request.slice(0,200)});start();const t=thought(0,'NARRATION DURING COMPACTION','narration');
@@ -220,7 +223,7 @@ input.on('line',async line=>{
  if(request.includes('turn_stopped')){text('RESUMED '+JSON.stringify({resume:process.argv.includes('--resume')?arg('--resume'):null,request}));return;}
  if(request.includes('<history_message')) {
   const transcript=msg.message.content.filter(c=>c.type==='text').map(c=>c.text).join('\n');
-  text('REPLAY '+JSON.stringify({input:transcript.length<5000?transcript:transcript.slice(0,500)+'\n'+transcript.slice(-1500),images:msg.message.content.filter(c=>c.type==='image').length,bytes:request.length,updatedPolicy:fs.readFileSync(arg('--system-prompt-file'),'utf8').includes('UPDATED-POLICY')}));return;
+  text('REPLAY '+JSON.stringify({input:transcript.length<5000?transcript:transcript.slice(0,500)+'\n'+transcript.slice(-1500),images:msg.message.content.filter(c=>c.type==='image').length,bytes:request.length,caching:process.env.DISABLE_PROMPT_CACHING?'off':'on',updatedPolicy:fs.readFileSync(arg('--system-prompt-file'),'utf8').includes('UPDATED-POLICY')}));return;
  }
  if(request.includes('api-error-')){apiError(Number(/api-error-(\d+)/.exec(request)[1]));return;}
  // Mirrors Claude Code 2.1.321 when a safety classifier flags the message:

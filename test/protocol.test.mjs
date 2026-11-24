@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {mergeText, historyMarks, historyDifference, thinkingKind, visualizeLine, VisualizeLines, CompletionLines, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
+import {mergeText, historyMarks, historyDifference, thinkingKind, visualizeLine, VisualizeLines, CompletionLines, fitReplay, replayEstimate, REPLAY_BUDGET, normalizeTools, contentBlocks, mcpResult, ResponseStream, userInput, replayImageNote, asPrompt, steeringPrompt, STEERING_NOTE, userTurn, elapsed, timeNote, newNotes, afterStop, afterWithdrawn, API_FAILED, CLAUDE_EXITED, stoppedTurnNote, resumeAfterStop, inputKey, historyStamp, extendsHistory, systemPrompt, isIncoming, sealCheckpoint, openCheckpoint, APPLY_PATCH_GUIDE, EXEC_STRING_NOTE, EXEC_OUTPUT_NOTE, KEEPALIVE_MS} from '../src/protocol.mjs';
 
 test('freeform tools preserve multiline JavaScript without JSON coercion',()=>{
  const [tool]=normalizeTools([{type:'custom',name:'exec',description:'Execute JS'}]);
@@ -441,4 +441,44 @@ test('a line that is the browser completion directive becomes a commentary messa
  const lines=new CompletionLines();
  assert.deepEqual(lines.push('Working on '),['Working on ']);assert.deepEqual(lines.push('it.\n::brow'),['it.\n']);assert.deepEqual(lines.push('se the page'),['::browse the page']);
  assert.deepEqual(lines.push(`\n${D}`),['\n']);assert.deepEqual(lines.end(),[{directive:D}]);
+});
+
+test('a replay over the budget leaves out the oldest tool outputs, then whole items after the first user message',()=>{
+ const user=(text,id)=>({type:'message',id,role:'user',content:[{type:'input_text',text}]});
+ const said=text=>({type:'message',role:'assistant',content:[{type:'output_text',text}]});
+ const call=n=>({type:'function_call',call_id:'c'+n,name:'shell',arguments:'{}'});
+ const result=(n,output)=>({type:'function_call_output',call_id:'c'+n,output});
+ const image={type:'input_image',image_url:'data:image/png;base64,'+'A'.repeat(400000)};
+ const developer={type:'message',role:'developer',content:[{type:'input_text',text:'Rules.'}]};
+ assert.equal(REPLAY_BUDGET,700000);
+ // The November 24, 2026 replay: 2.0M characters and 47 screenshots were 934,901 tokens.
+ assert.equal(replayEstimate([result(0,[{type:'input_text',text:'x'.repeat(1997736)},...Array(47).fill(image)])]),Math.ceil((1997736+'function_call_output'.length+'c0'.length+'input_text'.length)/2.5)+47*5000);
+ // Items the replay does not show cost nothing, and base64 is not counted as text.
+ assert.equal(replayEstimate([{type:'reasoning',encrypted_content:'x'.repeat(100000)},{type:'compaction_trigger'}]),0);
+ const items=[developer,user('Start the audit.','u1'),call(1),result(1,'a'.repeat(5000)),call(2),result(2,[{type:'input_text',text:'b'.repeat(5000)},image]),said('Half done.'),call(3),result(3,'tiny'),call(4),result(4,'d'.repeat(5000)),user('Continue.','u2')];
+ // Within the budget: the same array.
+ const whole=fitReplay(items,100000);assert.equal(whole.items,items);assert.deepEqual([whole.outputs,whole.dropped,whole.after],[0,0,whole.before]);
+ // Just over: only the oldest output goes, and the note states its size.
+ const one=fitReplay(items,replayEstimate(items)-1000);
+ assert.deepEqual([one.outputs,one.dropped],[1,0]);
+ assert.equal(one.items[3].output,'[The host left this tool output out of the replay to fit the context window: 5000 characters.]');
+ assert.equal(one.items[3].call_id,'c1');assert.equal(one.items[5],items[5]);assert.equal(items[3].output.length,5000);
+ assert.ok(one.after<=replayEstimate(items)-1000&&one.after===replayEstimate(one.items));
+ // Further over: outputs oldest first, images counted, small outputs and messages kept.
+ const two=fitReplay(items,replayEstimate(items)-8000);
+ assert.deepEqual([two.outputs,two.dropped],[2,0]);
+ assert.equal(two.items[5].output,'[The host left this tool output out of the replay to fit the context window: 5000 characters and 1 image.]');
+ assert.equal(two.items[8],items[8]);assert.equal(two.items[10],items[10]);
+ // A message from another thread is input like a user message, not a tool output.
+ const big='m'.repeat(900000);
+ const texts=[developer,user('Start.','u1'),said(big),call(1),result(1,'r'.repeat(300000)),said(big),user(big,'u2'),said('Recent.'),user('Continue.','u3')];
+ const cut=fitReplay(texts);
+ // With the output gone the messages are still over: the oldest items after the first user message go, replaced by one note.
+ assert.equal(cut.outputs,1);assert.ok(cut.dropped>=2);assert.ok(cut.after<=REPLAY_BUDGET);
+ assert.deepEqual(cut.items.slice(0,2),[developer,texts[1]]);
+ assert.deepEqual(cut.items[2],{type:'message',role:'developer',content:[{type:'input_text',text:`[The host left ${cut.dropped} earlier items out of this replay here to fit the context window.]`}]});
+ assert.equal(cut.items.at(-1),texts.at(-1));assert.equal(cut.items.length,texts.length-cut.dropped+1);
+ // A result is not left without its call, and the newest item always stays.
+ const pair=fitReplay([user('Start.','u1'),said(big),call(1),result(1,'ok'),user('Continue.','u2')],10);
+ assert.deepEqual(pair.items.map(x=>x.role??x.type),['user','developer','user']);assert.equal(pair.dropped,3);
 });

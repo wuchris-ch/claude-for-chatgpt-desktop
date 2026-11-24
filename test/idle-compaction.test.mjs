@@ -58,7 +58,7 @@ test('settings.json turns idle compaction off or moves its threshold, to no less
  }
 });
 test('an idle turn is compacted on a fork with its own settings, and a cold next turn starts from the summary',async t=>{
- const {b,logs,turn,compactions}=await setup(t);const first=request('args-probe first');
+ const {b,logs,turn,post,compactions}=await setup(t);const first=request('args-probe first');
  const one=await turn(first);
  const original=claudeIdOf(b);
  const s=await fire(b);
@@ -76,9 +76,17 @@ test('an idle turn is compacted on a fork with its own settings, and a cold next
  assert.deepEqual(shown[0],{phase:'commentary',text:'Compacted while idle: Claude now works from a summary of the earlier turns (381K to 12K tokens), written before the prompt cache expired.'});
  assert.equal(args(two).resume,run.session_id);assert.equal(s.record.claudeId,run.session_id);assert.equal(s.record.idle,undefined);
  assert.ok(logs.some(x=>x.event==='idle_compaction_used'&&x.before===381000));
+ // The desktop's transcript still holds the 369K tokens the summary replaced, so the size it is told includes them.
+ const size=body=>events(body).findLast(x=>x.type==='response.completed').response.usage;
+ const before=size(await(await post({...request('args-probe other'),input:[user('args-probe other','other1')]},{'thread-id':'other'})).text());
+ await waitUntil(()=>[...b.sessions.values()].every(s=>!s.child));
  // Later turns stay on the compacted session.
- const three=await turn({...first,input:[...first.input,...one,user('args-probe second','user2'),...two,user('args-probe third','user3')]});
+ const third=await(await post({...first,input:[...first.input,...one,user('args-probe second','user2'),...two,user('args-probe third','user3')]})).text();
+ await waitUntil(()=>[...b.sessions.values()].every(s=>!s.child));
+ const three=output(third);
  assert.equal(args(three).resume,run.session_id);
+ assert.equal(size(third).input_tokens,before.input_tokens+369000);assert.equal(size(third).total_tokens,size(third).input_tokens+size(third).output_tokens);
+ assert.equal(s.record.contextTokens,before.input_tokens+before.output_tokens);
  assert.equal(logs.some(x=>['error','history_branch_rebuilt','regeneration_rebuilt','interrupted_turn_recovery'].includes(x.event)),false);
 });
 test('while the cache is still warm, the next turn resumes the full conversation and the summary is dropped',async t=>{

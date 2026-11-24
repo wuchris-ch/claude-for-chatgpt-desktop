@@ -491,6 +491,41 @@ test('a compaction at a turn boundary forks the native session with its prompt, 
  assert.ok(logs.some(x=>x.event==='compaction_fork'&&x.extra_items===1&&x.cold===false));assert.equal(report.caching,'on');
  assert.equal(logs.some(x=>x.event==='history_import'||x.event==='error'),false);
 });
+test('a compaction fork that no longer fits the window writes the checkpoint from a replay of the transcript, without a second fork',async t=>{
+ const {post,logs,dir}=await setup(t);const first=request('hello');
+ const answer=output(await(await post(first)).text());
+ const marker=path.join(dir,'fake-fork-too-long');fs.writeFileSync(marker,'');
+ const next=request('next question','user2').input[0];
+ const text=await checkpoint(await compact(post,{...first,input:[...first.input,...answer,next]}));
+ // The fork was tried once. The checkpoint comes from the compaction component reading the transcript.
+ assert.equal(fs.readFileSync(marker,'utf8'),'x');
+ assert.match(text,/^REPLAY /);assert.match(text,/history_message role=\\"user\\".*hello.*next question/);
+ // Nothing reads that session again, so it writes no cache.
+ assert.match(text,/"caching":"off"/);
+ const order=['compaction_fork','compaction_too_long','history_import'].map(e=>logs.findIndex(x=>x.event===e));
+ assert.ok(order[0]>=0&&order[0]<order[1]&&order[1]<order[2],JSON.stringify(order));
+ assert.equal(logs.filter(x=>x.event==='compaction_fork').length,1);
+ assert.equal(logs.some(x=>x.event==='error'),false);
+});
+test('a transcript too large for the window is replayed without its oldest tool outputs, and the log says so',async t=>{
+ const {post,logs}=await setup(t);const first=request('hello');
+ const cycle=n=>[{type:'function_call',call_id:'call'+n,name:'shell',arguments:'{"n":'+n+'}'},{type:'function_call_output',call_id:'call'+n,output:'OUTPUT'+n+' '+'x'.repeat(600000)}];
+ const input=[...first.input,{type:'message',role:'assistant',content:[{type:'output_text',text:'Working.'}]},...cycle(1),...cycle(2),...cycle(3),...cycle(4),...request('what next','user2').input];
+ const out=output(await(await post({...first,input})).text());
+ const report=JSON.parse(out.at(-1).content[0].text.replace(/^REPLAY /,''));
+ // 2.4M characters count as 960K tokens. Leaving out the two oldest outputs brings the replay under 700K.
+ assert.match(report.input,/previous_tool_result call_id=\"call1\">\n\[The host left this tool output out of the replay to fit the context window: 600008 characters\.\]/);
+ const line=logs.find(x=>x.event==='history_import');
+ assert.deepEqual({outputs:line.outputs_left_out,items:line.items_left_out},{outputs:2,items:0});
+ assert.ok(line.estimate>900000&&line.fitted<=700000);
+ assert.match(report.input,/what next/);
+ assert.equal(logs.some(x=>x.event==='error'),false);
+ // A transcript that fits is replayed whole.
+ const small=await setup(t);
+ const whole=output(await(await small.post({...first,input:[...first.input,...cycle(1),...request('what next','user2').input]})).text());
+ assert.doesNotMatch(whole.at(-1).content[0].text,/left this tool output out/);assert.match(whole.at(-1).content[0].text,/"caching":"on"/);
+ assert.deepEqual(small.logs.find(x=>x.event==='history_import'),{event:'history_import',session:small.logs.find(x=>x.event==='history_import').session,reason:'new_or_compacted_context'});
+});
 test('after a compaction between turns, the kept messages start the new window as earlier turns',async t=>{
  // Like the desktop after a manual compaction: the user's earlier messages,
  // with their screenshots and no answers between them, then the checkpoint

@@ -523,6 +523,52 @@ export function userInput(items, {replay = false, prefix = true} = {}) {
   return out.length ? out : [{type: 'text', text: 'Continue from the current conversation context.'}];
 }
 
+// A replay of the desktop's transcript is one prompt, and it must fit the
+// model's window with room for the reply. The desktop compacts a thread from
+// the size the bridge reports, which after an idle compaction was the size of
+// the summary, so the desktop's transcript kept growing. On November 24, 2026
+// (UTC) a rebuild replayed 636 items as 968,390 tokens (2.0M characters of
+// text and 47 screenshots) where the native session held 438,482. The
+// desktop's compaction then forked that session and Claude Code answered
+// "Prompt is too long", for every retry. A replay above the budget leaves out
+// tool outputs, oldest first, and then whole items after the first user
+// message. The estimate is deliberately high: that replay counts as 1.04M.
+export const REPLAY_BUDGET=700000;
+const REPLAY_CHARS_PER_TOKEN=2.5,REPLAY_IMAGE_TOKENS=5000,REPLAY_SMALL_OUTPUT=1000;
+const UNREPLAYED=['reasoning','compaction_trigger','tool_search_call','tool_search_output'];
+function replaySize(value) {
+  let chars=0,images=0;
+  const walk=v=> {
+    if(typeof v==='string')chars+=v.length;
+    else if(Array.isArray(v))for(const x of v)walk(x);
+    else if(v&&typeof v==='object'){if(isImageContent(v)){images++;return;}for(const x of Object.values(v))walk(x);}
+  };
+  walk(value);return {chars,images};
+}
+const replayTokens=({chars,images})=>Math.ceil(chars/REPLAY_CHARS_PER_TOKEN)+images*REPLAY_IMAGE_TOKENS;
+export function replayEstimate(items) {return items.reduce((n,x)=>n+(UNREPLAYED.includes(x.type)?0:replayTokens(replaySize(x))),0);}
+export function fitReplay(items,budget=REPLAY_BUDGET) {
+  const costs=items.map(x=>UNREPLAYED.includes(x.type)?0:replayTokens(replaySize(x)));
+  const before=costs.reduce((a,b)=>a+b,0);let total=before;
+  if(total<=budget)return {items,before,after:before,outputs:0,dropped:0};
+  const out=[...items];let outputs=0,dropped=0;
+  for(let i=0;i<out.length&&total>budget;i++) {
+    if(!isCallResult(out[i])||costs[i]<=REPLAY_SMALL_OUTPUT)continue;
+    const output=out[i].output,{images}=replaySize(output);
+    const chars=typeof output==='string'?output.length:Array.isArray(output)?output.reduce((n,c)=>n+(typeof c?.text==='string'?c.text.length:0),0):0;
+    out[i]={...out[i],output:`[The host left this tool output out of the replay to fit the context window: ${chars} characters${images?` and ${images} image${images===1?'':'s'}`:''}.]`};
+    const cost=replayTokens(replaySize(out[i]));total-=costs[i]-cost;costs[i]=cost;outputs++;
+  }
+  if(total>budget) {
+    const start=Math.max(leadingEnd(out),out.findIndex(isUser)+1);let end=start;
+    // The newest item stays. A result is not left without its call.
+    while(end<out.length-1&&(total>budget||isCallResult(out[end]))){total-=costs[end];end++;}
+    dropped=end-start;
+    if(dropped)out.splice(start,dropped,{type:'message',role:'developer',content:[{type:'input_text',text:`[The host left ${dropped} earlier items out of this replay here to fit the context window.]`}]});
+  }
+  return {items:out,before,after:total,outputs,dropped};
+}
+
 // Claude Code saves each image in a prompt and lists the copies after it as
 // [Image: source: …] lines. After a history import, such as a new side chat,
 // those lines read as images the user had just attached: Opus opened an old

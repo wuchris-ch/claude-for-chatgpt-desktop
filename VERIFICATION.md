@@ -4,6 +4,22 @@ This file records how the bridge was tested and what was measured. The fixture t
 
 Development versions 0.2.0 to 0.2.22 served Claude Opus 5.5 only, in a separate window, so the measurements in the later sections were made on Opus. Version 0.3.0 added Sonnet and Haiku, model selection, API key mode, opt-in web search and picker mode. Version 0.3.1 added Fable and names that carry the model version. Version 0.3.3 moved Haiku to 5.5 and added the one-line installer. Version 0.3.5 brought seven fixes from the separate-window bridge, 0.3.6 fixes found in a review of picker mode, 0.3.7 fixes from an adversarial review of the whole project, 0.3.8 fixes from reviews that drove the app's own runtime, plus resuming instead of rebuilding, and 0.3.9 web search in the picker. Version 0.3.13 moves the separate window's new chats to the app's own provider, 0.3.14 updates dependencies, 0.3.15 brings fixes from a verification pass of the whole project, 0.3.16 reads chats with hundreds of megabytes of screenshots, 0.3.17 trims the screenshots a compaction keeps, 0.3.18 counts images at the size Claude Code sends, 0.3.19 moves the separate window's earlier chats to its provider, 0.3.20 has Claude answer a mid-turn question when it arrives, 0.3.21 shows the progress Claude writes in its thinking, 0.3.22 marks the messages a compaction kept between turns as earlier turns, 0.3.23 compacts idle chats before the prompt cache expires, 0.3.24 tells Claude that the app folds its progress notes when a turn ends, 0.3.25 starts Claude Fable 5.2, 0.3.26 starts a turn again when a message arrives before Claude's first word, 0.3.27 runs chat titles on Haiku, 0.3.28 ends a flagged message with a plain note instead of a retry on an older model, and 0.3.29 copies the most capable GPT entry for the Claude models and sends every message to Claude Code as written. The newest checks come first.
 
+## Release 0.3.34, checked November 24, 2026
+
+### A chat whose compaction no longer fit
+
+In the separate-window bridge, the app showed "Error running remote compact task: Prompt is too long" in a chat on November 24, 2026 (UTC), and again on each "continue".
+
+The chat had used two idle summaries. After each, the native session was small and the bridge reported that size. The app compacts at 500,000 reported tokens, so it never compacted, and its transcript grew to 636 items. A rebuild from that transcript then replayed 968,390 tokens (2.0M characters and 47 screenshots) where the native session had held 438,482. The app asked for a compaction, and the fork of that session with the checkpoint request was over the 1M window. Claude Code 2.1.321 answered "Prompt is too long" in 0.4 s, for every retry.
+
+- **Reported size.** `record.summarized` holds the tokens that idle summaries replaced in the native session. Each response's `input_tokens` to the app includes it, so the app compacts at the point it would have reached without the summary. The bridge's own figures stay native.
+- **Bounded replay.** `fitReplay` in `src/protocol.mjs` estimates a replay at 2.5 characters per token and 5,000 tokens per image, which is high on purpose. Above `REPLAY_BUDGET` (700,000) it replaces tool outputs with a one-line note of their size, oldest first, until the replay fits. If messages alone are over, it drops the oldest items after the first user message and leaves one note. `history_import` logs `estimate`, `fitted`, `outputs_left_out` and `items_left_out`. A replay within the budget is unchanged.
+- **Compaction fallback.** When a compaction fork ends with "Prompt is too long", the bridge logs `compaction_too_long` and writes the checkpoint from the bounded replay, in the same response. A checkpoint written from a replay writes no prompt cache.
+
+On the chat's own transcript (640 items), `fitReplay` took the estimate from 1,035,759 to 696,119 by leaving out 52 of 266 tool outputs, all in the older half, and dropped no item.
+
+A unit test covers `fitReplay`. Two integration tests cover a fork the fixture answers with "Prompt is too long" and a 2.4M-character transcript. The idle compaction test checks the size sent to the app. Each fails without its change.
+
 ## Release 0.3.33, checked November 22, 2026
 
 ### The browser completion directive

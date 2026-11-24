@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {ListToolsRequestSchema, CallToolRequestSchema} from '@modelcontextprotocol/sdk/types.js';
-import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, replayImageNote, asPrompt, mergeText, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, historyMarks, historyDifference, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, idleNotice, afterWithdrawn, isSafetyFlag, safetyFlagNote, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
+import {digest, thinkingKind, isCheckpoint, normalizeTools, mcpResult, systemPrompt, userInput, fitReplay, replayImageNote, asPrompt, mergeText, steeringPrompt, isResult, isCallResult, isHostCall, isIncoming, newNotes, inputKey, historyItems, historyStamp, historyMarks, historyDifference, extendsHistory, historyEnd, afterStop, stoppedTurnNote, resumeAfterStop, resampledSteer, userStopped, userTurn, timeNote, goalToolNote, otherModelTurns, otherModelAfterStop, OTHER_MODEL_NOTE, outputSchema, offersWebSearch, ResponseStream, CompactionStream, COMPACTION_REQUEST, idleNotice, afterWithdrawn, isSafetyFlag, safetyFlagNote, API_FAILED, CLAUDE_EXITED} from './protocol.mjs';
 import {effortFor, labelFor, startedModelMatches} from './models.mjs';
 import {boundToolImages, assertModelInputFits} from './image-history.mjs';
 import {WEB_RUN_TOOL, runSearch, searchAction, searchContext} from './search.mjs';
@@ -539,7 +539,9 @@ export class Session {
   async launch(context) {
     const {body,originalInput,model,name,prompt,activeStream}=context;
     this.turnKey=body.__bridge_turn_key;
-    let fork=body.__bridge_compaction&&!this.record.started&&body.__bridge_turn_key?await this.compactionFork(originalInput,body.__bridge_turn_key):null;
+    // A fork that no longer fits the model's window is not tried again: the
+    // checkpoint is written from a replay of the transcript that fits.
+    let fork=body.__bridge_compaction&&!context.forkTooLong&&!this.record.started&&body.__bridge_turn_key?await this.compactionFork(originalInput,body.__bridge_turn_key):null;
     if(fork?.reason){this.log('compaction_import',{reason:fork.reason});fork=null;}
     if(fork){this.tools=fork.tools;this.log('compaction_fork',{from:fork.from,extra_items:fork.extra.length,cold:fork.cold,stopped:fork.stopped?.reason??null,...(fork.idle?{idle_summary:true}:{})});}
     await this.setupMcp();
@@ -563,8 +565,9 @@ export class Session {
       // A compacted context is history too, even when the compaction kept only
       // the user's messages.
       const replay=body.input.some(x=>x.role==='assistant'||isCallResult(x)||['function_call','custom_tool_call'].includes(x.type)&&!isHostCall(x)||isCheckpoint(x));
-      input=[...userInput(body.input,{replay}),...(replay?replayImageNote(body.input):[])];
-      if(replay)this.log('history_import',{reason:'new_or_compacted_context'});
+      const fitted=replay?fitReplay(body.input):{items:body.input};
+      input=[...userInput(fitted.items,{replay}),...(replay?replayImageNote(fitted.items):[])];
+      if(replay)this.log('history_import',{reason:'new_or_compacted_context',...(fitted.outputs||fitted.dropped?{estimate:fitted.before,fitted:fitted.after,outputs_left_out:fitted.outputs,items_left_out:fitted.dropped}:{})});
     }
     // A message the desktop resent mid-response is a mid-turn message, which gets no time note.
     const steered=!fork&&this.resumeItems&&!this.otherAfterStop&&resampledSteer(this.resumeItems,this.record.stop?.reason);
@@ -601,6 +604,8 @@ export class Session {
       if(reason)this.log('idle_compaction_discarded',{reason});
       else {
         summary=idle;this.record.claudeId=idle.claudeId;this.record.turnEnd=null;
+        // The desktop's transcript still holds what the summary replaced.
+        this.record.summarized=(this.record.summarized??0)+Math.max(0,(idle.before??0)-(idle.after??0));
         this.log('idle_compaction_used',{before:idle.before,after:idle.after,idle_minutes:Math.round((Date.now()-idle.cacheAt)/60000),...(cacheLost?{cache_lost:'model'}:{})});
       }
     }
@@ -614,7 +619,9 @@ export class Session {
     // Nothing reads a fork's cache afterwards. Once the session's own cache
     // has expired, writing one costs twice the plain input price for the whole
     // conversation, 441k tokens in one compaction of an idle thread.
-    if(fork?.cold)env.DISABLE_PROMPT_CACHING='1';
+    // A checkpoint written from a replay runs in a session of its own that
+    // has one request.
+    if(fork?.cold||body.__bridge_compaction&&!fork)env.DISABLE_PROMPT_CACHING='1';
     if(this.stream!==activeStream)return;
     // Claude Code carries a session's usage totals across --resume and forks,
     // so models the session ran on before are expected in them.
@@ -623,7 +630,7 @@ export class Session {
     this.child=spawn(this.bridge.claude,args,{cwd:this.bridge.claudeCwd,env,stdio:['pipe','pipe','pipe']});
     this.stopping=false;
     const child=this.child;this.stderr='';this.nativeCalls=[];this.ready=false;this.forked=!!fork;
-    this.steers.clear();this.ack=null;this.deferredStop=null;this.lastAssistant=null;this.apiError=null;this.refusal=null;this.truncating=!!truncate;this.apiStarted=false;this.titleStalled=false;
+    this.steers.clear();this.ack=null;this.deferredStop=null;this.lastAssistant=null;this.apiError=null;this.refusal=null;this.truncating=!!truncate;this.apiStarted=false;this.titleStalled=false;this.forkTooLong=false;
     // Where a withdrawn turn returns to: the end of the last completed turn.
     // A truncating resume keeps the same point.
     if(!truncate)this.record.settled=!fork&&this.record.started&&!this.record.inflight&&this.record.turnEnd?{history:this.record.history,at:this.record.turnEnd}:null;
@@ -649,8 +656,10 @@ export class Session {
       const refused=!!truncate&&!this.ready&&!this.stopping&&this.stream===activeStream&&!activeStream.finished;
       // A title request the bridge stopped because no reply had started.
       const stalled=this.titleStalled&&this.stream===activeStream&&!activeStream.finished;
+      // A compaction fork that did not fit the model's window.
+      const tooLong=this.forkTooLong&&!this.stopping&&this.stream===activeStream&&!activeStream.finished;
       if(refused)this.log('withdrawn_turn_refused',{code,signal,message:(this.refusal||this.stderr).slice(0,300)});
-      else if(stalled);
+      else if(stalled||tooLong);
       else if(this.stream&&!this.stream.finished)this.fail(`Claude Code exited before completion (${code??signal}). ${this.stderr}`);
       // Claude Code exited on its own while the host ran a tool: 2 of 3 turns
       // cut off by a restart in the separate-window bridge's log, where the
@@ -661,6 +670,7 @@ export class Session {
       this.exiting=null;this.lastUsed=Date.now();resolve();
       if(refused)this.relaunch(context);
       if(stalled)this.relaunch(context,'title_retry');
+      if(tooLong){context.forkTooLong=true;this.relaunch(context,'compaction_too_long');}
     }));
     // The app waits 30 s for a chat's title and then keeps a title cut from
     // the first message. On November 20, 2026 two title requests in a row got
@@ -831,6 +841,13 @@ export class Session {
         if(this.ready&&this.record.inflight&&!(this.stream instanceof CompactionStream)&&(msg.api_error_status!=null||this.apiError))
           this.saveStop(API_FAILED,{unseen:[...this.steers.values()].flat(),replied:false,status:msg.api_error_status??null});
         const said=msg.result||msg.errors?.join('\n')||`Claude failed: ${msg.subtype}`;
+        // The session and the checkpoint request together no longer fit the
+        // model's window. Claude Code answers at once, before any request.
+        if(this.forked&&this.stream instanceof CompactionStream&&/prompt is too long/i.test(said)) {
+          this.forkTooLong=true;
+          const child=this.child;this.exiting=this.childDone;child.stdin.end();this.reap(child);
+          return;
+        }
         if(isSafetyFlag(said)&&!(this.stream instanceof CompactionStream)) {
           this.log('safety_flag',{model:this.runModel.slug});
           throw new Error(safetyFlagNote(this.runModel,this.bridge.models,said));
@@ -898,7 +915,12 @@ export class Session {
     const calls=this.stream.output.filter(x=>['function_call','custom_tool_call'].includes(x.type));
     this.record.historyWithoutCalls=calls.length?historyStamp([...this.streamInput,...this.stream.output.filter(x=>!calls.includes(x))]):null;
     this.record.lastReplyAt=Date.now();this.save();
-    this.usage.total_tokens=this.usage.input_tokens+this.usage.output_tokens;this.stream?.complete(this.usage);
+    // The desktop compacts a thread from the size reported here. Its
+    // transcript still holds the turns an idle summary replaced in the native
+    // session, and a rebuild replays them, so they count.
+    const summarized=this.stream instanceof CompactionStream?0:this.record.summarized??0;
+    const usage={...this.usage,input_tokens:this.usage.input_tokens+summarized};
+    usage.total_tokens=usage.input_tokens+usage.output_tokens;this.stream?.complete(usage);
     this.releaseResponse();
   }
   releaseResponse() {
